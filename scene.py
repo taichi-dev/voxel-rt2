@@ -12,16 +12,17 @@ VOXEL_DX = 1 / 64
 SCREEN_RES = (1280, 720)
 TARGET_FPS = 30
 UP_DIR = (0, 1, 0)
-HELP_MSG = '''
+HELP_MSG = """
 ====================================================
 Camera:
 * Drag with your left mouse button to rotate
 * Press W/A/S/D/Q/E to move
 ====================================================
-'''
+"""
 
 MAT_LAMBERTIAN = 1
 MAT_LIGHT = 2
+
 
 class Camera:
     def __init__(self, window, up):
@@ -71,12 +72,12 @@ class Camera:
         tgtdir = self.target_dir
         leftdir = self._compute_left_dir(tgtdir)
         lut = [
-            ('w', tgtdir),
-            ('a', leftdir),
-            ('s', -tgtdir),
-            ('d', -leftdir),
-            ('e', [0, -1, 0]),
-            ('q', [0, 1, 0]),
+            ("w", tgtdir),
+            ("a", leftdir),
+            ("s", -tgtdir),
+            ("d", -leftdir),
+            ("e", [0, -1, 0]),
+            ("q", [0, 1, 0]),
         ]
         dir = np.array([0.0, 0.0, 0.0])
         pressed = False
@@ -114,28 +115,27 @@ class Scene:
     def __init__(self, voxel_edges=0.06, exposure=3):
         ti.init(arch=ti.vulkan)
         print(HELP_MSG)
-        self.window = ti.ui.Window("Taichi Voxel Renderer",
-                                   SCREEN_RES,
-                                   vsync=True)
+        self.window = ti.ui.Window("Taichi Voxel Renderer", SCREEN_RES, vsync=True)
         self.camera = Camera(self.window, up=UP_DIR)
-        self.renderer = Renderer(dx=VOXEL_DX,
-                                 image_res=SCREEN_RES,
-                                 up=UP_DIR,
-                                 voxel_edges=voxel_edges,
-                                 exposure=exposure)
+        self.renderer = Renderer(
+            dx=VOXEL_DX,
+            image_res=SCREEN_RES,
+            up=UP_DIR,
+            voxel_edges=voxel_edges,
+            exposure=exposure,
+        )
 
         self.renderer.set_camera_pos(*self.camera.position)
-        if not os.path.exists('screenshot'):
-            os.makedirs('screenshot')
+        if not os.path.exists("screenshot"):
+            os.makedirs("screenshot")
 
     @staticmethod
     @ti.func
     def round_idx(idx_):
         idx = ti.cast(idx_, ti.f32)
-        return ti.Vector(
-            [ti.round(idx[0]),
-             ti.round(idx[1]),
-             ti.round(idx[2])]).cast(ti.i32)
+        return ti.Vector([ti.round(idx[0]), ti.round(idx[1]), ti.round(idx[2])]).cast(
+            ti.i32
+        )
 
     @ti.func
     def set_voxel(self, idx, mat, color):
@@ -158,8 +158,11 @@ class Scene:
 
     def finish(self):
         self.renderer.recompute_bbox()
+        self.renderer.prepare_data()
         canvas = self.window.get_canvas()
         spp = 1
+        samples = 0
+        initial_t = time.time()
         while self.window.running:
             should_reset_framebuffer = False
 
@@ -173,14 +176,16 @@ class Scene:
                 self.renderer.reset_framebuffer()
 
             t = time.time()
-            for _ in range(spp):
-                self.renderer.accumulate()
+            self.renderer.accumulate(spp)
+            samples += spp
             img = self.renderer.fetch_image()
-            if self.window.is_pressed('p'):
-                timestamp = datetime.today().strftime('%Y-%m-%d-%H%M%S')
+            if self.window.is_pressed("p"):
+                timestamp = datetime.today().strftime("%Y-%m-%d-%H%M%S")
                 dirpath = os.getcwd()
                 main_filename = os.path.split(__main__.__file__)[1]
-                fname = os.path.join(dirpath, 'screenshot', f"{main_filename}-{timestamp}.jpg")
+                fname = os.path.join(
+                    dirpath, "screenshot", f"{main_filename}-{timestamp}.jpg"
+                )
                 ti.tools.image.imwrite(img, fname)
                 print(f"Screenshot has been saved to {fname}")
             canvas.set_image(img)
@@ -190,4 +195,8 @@ class Scene:
                 spp = max(spp, 1)
             else:
                 spp += 1
+            if samples > 1024:
+                print("1024 samples took", time.time() - initial_t)
+                samples = 0
+                initial_t = time.time()
             self.window.show()
