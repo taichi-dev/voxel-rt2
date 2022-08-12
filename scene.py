@@ -162,6 +162,7 @@ class Scene:
         spp = 1
         samples = 0
         initial_t = time.time()
+        last_t = initial_t
         while self.window.running:
             should_reset_framebuffer = False
 
@@ -174,28 +175,31 @@ class Scene:
             if should_reset_framebuffer:
                 self.renderer.reset_framebuffer()
 
-            t = time.time()
             self.renderer.accumulate(spp)
             samples += spp
             img = self.renderer.fetch_image()
-            if self.window.is_pressed("p"):
-                timestamp = datetime.today().strftime("%Y-%m-%d-%H%M%S")
-                dirpath = os.getcwd()
-                main_filename = os.path.split(__main__.__file__)[1]
-                fname = os.path.join(
-                    dirpath, "screenshot", f"{main_filename}-{timestamp}.jpg"
-                )
-                ti.tools.image.imwrite(img, fname)
-                print(f"Screenshot has been saved to {fname}")
+            # if self.window.is_pressed("p"):
+            #     timestamp = datetime.today().strftime("%Y-%m-%d-%H%M%S")
+            #     dirpath = os.getcwd()
+            #     main_filename = os.path.split(__main__.__file__)[1]
+            #     fname = os.path.join(
+            #         dirpath, "screenshot", f"{main_filename}-{timestamp}.jpg"
+            #     )
+            #     ti.tools.image.imwrite(img, fname)
+            #     print(f"Screenshot has been saved to {fname}")
             canvas.set_image(img)
-            elapsed_time = time.time() - t
-            if elapsed_time * TARGET_FPS > 1:
-                spp = int(spp / (elapsed_time * TARGET_FPS) - 1)
-                spp = max(spp, 1)
-            else:
-                spp += 1
             if samples > 1024:
                 print("1024 samples took", time.time() - initial_t)
                 samples = 0
                 initial_t = time.time()
             self.window.show()
+
+            t = time.time()
+            elapsed_time = t - last_t
+            if elapsed_time * TARGET_FPS > 1:
+                spp = int(spp / (elapsed_time * TARGET_FPS) - 1)
+                spp = max(spp, 1)
+            else:
+                spp += 1
+            last_t = t
+
