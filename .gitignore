@@ -6,3 +6,5 @@ imgui.ini
 .*.swp
 .idea
 screenshot/
+*.spv
+__pycache__

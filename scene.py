@@ -4,12 +4,12 @@ from datetime import datetime
 import numpy as np
 import taichi as ti
 from renderer import Renderer
-from math_utils import np_normalize, np_rotate_matrix
+from renderer.math_utils import np_normalize, np_rotate_matrix
 import __main__
 
 
 VOXEL_DX = 1 / 64
-SCREEN_RES = (1280, 720)
+SCREEN_RES = (1920, 1080)
 TARGET_FPS = 30
 UP_DIR = (0, 1, 0)
 HELP_MSG = """
@@ -157,7 +157,6 @@ class Scene:
         self.renderer.background_color[None] = color
 
     def finish(self):
-        self.renderer.recompute_bbox()
         self.renderer.prepare_data()
         canvas = self.window.get_canvas()
         spp = 1
