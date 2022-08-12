@@ -48,7 +48,7 @@ class Renderer:
         self.world = VoxelWorld(dx, self.voxel_grid_res, voxel_edges)
         self.voxel_raytracer = VoxelOctreeRaytracer(self.voxel_grid_res)
 
-        self._rendered_image = ti.Vector.field(3, float, image_res)
+        self._rendered_image = ti.Texture(ti.f32, 4, self.image_res)
         self.set_up(*up)
         self.set_fov(0.23)
 
@@ -310,7 +310,7 @@ class Renderer:
                     ) = self.generate_new_sample(u, v)
 
     @ti.kernel
-    def _render_to_image(self, samples: ti.i32):
+    def _render_to_image(self, img : ti.types.rw_texture(num_dimensions=2, num_channels=4, channel_format=ti.f32, lod=0), samples: ti.i32):
         for i, j in self.color_buffer:
             uv = ti.Vector([i, j]) / self.image_res
 
@@ -318,8 +318,9 @@ class Renderer:
                 max(ti.math.distance(uv, self.vignette_center) -
                     self.vignette_radius, 0.0)
 
-            self._rendered_image[i, j] = ti.pow(
+            ldr_color = ti.pow(
                 uchimura(self.color_buffer[i, j] * darken * self.exposure / samples), 1.0 / 2.2)
+            img.store(ti.Vector([i, j]), ti.Vector([ldr_color.r, ldr_color.g, ldr_color.b, 1.0]))
 
     def reset_framebuffer(self):
         self.current_spp = 0
@@ -330,7 +331,7 @@ class Renderer:
         self.current_spp += n_spp
 
     def fetch_image(self):
-        self._render_to_image(self.current_spp)
+        self._render_to_image(self._rendered_image, self.current_spp)
         return self._rendered_image
 
     @ti.func
