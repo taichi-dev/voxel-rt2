@@ -1,7 +1,9 @@
 import math
 import taichi as ti
+import numpy as np
 
-from math_utils import eps, inf, out_dir, ray_aabb_intersection
+from math_utils import (eps, inf, out_dir, vec3, saturate, ray_aabb_intersection)
+import bsdf
 
 MAX_RAY_DEPTH = 4
 use_directional_light = True
@@ -168,7 +170,7 @@ class Renderer:
             if voxel_material == 2:
                 is_light = 1
 
-        return voxel_color * (1.3 - 1.2 * f), is_light
+        return voxel_color, is_light #  * (1.3 - 1.2 * f)
 
     @ti.func
     def ray_march(self, p, d):
@@ -413,6 +415,19 @@ class Renderer:
 
     @ti.kernel
     def render(self, n_spp: ti.i32, colors: ti.types.texture(3)):
+
+        hardcoded_mat = bsdf.disney_material_params(base_col=vec3([1.0,1.0,1.0]) \
+                                        ,subsurface=0.0 \
+                                        ,metallic=0.2 \
+                                        ,specular=0.5 \
+                                        ,specular_tint=0.0 \
+                                        ,roughness=0.4 \
+                                        ,anisotropic=0.0 \
+                                        ,sheen=0.0 \
+                                        ,sheen_tint=0.0 \
+                                        ,clearcoat=0.8 \
+                                        ,clearcoat_gloss=0.99)
+
         # Render
         ti.loop_config(block_dim=64)
         for u, v in self.color_buffer:
@@ -424,7 +439,7 @@ class Renderer:
                 t,
                 contrib,
                 throughput,
-                c,
+                albedo,
                 depth,
                 hit_light,
                 hit_background,
@@ -435,16 +450,27 @@ class Renderer:
                 sample_complete = False
 
                 depth += 1
-                closest, normal, c, hit_light, iters = self.next_hit(pos, d, t, colors)
+                closest, normal, albedo, hit_light, iters = self.next_hit(pos, d, t, colors)
                 hit_pos = pos + closest * d
                 # if depth == 1:
                 #     worst_case_iters = ti.simt.subgroup.reduce_max(iters)
                 #     best_case_iters = ti.simt.subgroup.reduce_min(iters)
                 #     self.color_buffer[u, v] += ti.Vector([worst_case_iters / 64.0, best_case_iters / 64.0, 0.0])
                 if not hit_light and normal.norm() != 0 and closest < 1e8:
-                    d = out_dir(normal)
                     pos = hit_pos + normal * eps
-                    throughput *= c
+                    hardcoded_mat.base_col = albedo
+                    view = -d
+
+                    tang = normal.cross(vec3([0.0, 1.0, 1.0])).normalized()
+                    bitang = tang.cross(normal)
+
+                    d, brdf, pdf = bsdf.sample_disney(hardcoded_mat, view, normal, tang, bitang)
+
+                    # d = out_dir(normal)
+
+                    # brdf = bsdf.disney_evaluate(hardcoded_mat, view, normal, d, tang, bitang)
+                    # pdf = saturate(d.dot(normal)) / np.pi
+                    
 
                     if ti.static(use_directional_light):
                         dir_noise = (
@@ -468,18 +494,24 @@ class Renderer:
                             )
                             if dist > DIS_LIMIT:
                                 # far enough to hit directional light
-                                contrib += throughput * self.light_color[None] * dot
+                                light_brdf = bsdf.disney_evaluate(hardcoded_mat, view, normal, light_dir, tang, bitang)
+                                contrib += throughput * light_brdf * self.light_color[None] * np.pi * dot
+
+                    # Apply mask to throughput
+                    throughput *= ti.math.clamp(brdf * saturate(d.dot(normal)) / pdf, 0.0, 999999.0)
+
                 else:  # hit background or light voxel, terminate tracing
                     hit_background = 1
+                    contrib += throughput * self.background_color[None]
                     sample_complete = True
 
                 # Russian roulette
-                max_c = throughput.max()
-                if ti.random() > max_c:
-                    throughput = [0, 0, 0]
-                    sample_complete = True
-                else:
-                    throughput /= max_c
+                # max_c = throughput.max()
+                # if ti.random() > max_c:
+                #     throughput = [0, 0, 0]
+                #     sample_complete = True
+                # else:
+                #     throughput /= max_c
 
                 if depth >= MAX_RAY_DEPTH:
                     sample_complete = True
@@ -487,7 +519,7 @@ class Renderer:
                 # Tracing end
                 if sample_complete:
                     if hit_light:
-                        contrib += throughput * c
+                        contrib += throughput * albedo
                     else:
                         if depth == 1 and hit_background:
                             # Direct hit to background
@@ -500,7 +532,7 @@ class Renderer:
                         t,
                         contrib,
                         throughput,
-                        c,
+                        albedo,
                         depth,
                         hit_light,
                         hit_background,
@@ -525,7 +557,7 @@ class Renderer:
 
             for c in ti.static(range(3)):
                 self._rendered_image[i, j][c] = ti.sqrt(
-                    self.color_buffer[i, j][c] * darken * self.exposure / samples
+                    self.color_buffer[i, j][c] * self.exposure / samples # * darken
                 )
 
     @ti.kernel

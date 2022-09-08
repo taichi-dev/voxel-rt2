@@ -9,8 +9,8 @@ import __main__
 
 
 VOXEL_DX = 1 / 64
-SCREEN_RES = (1280, 720)
-TARGET_FPS = 30
+SCREEN_RES = (1920, 1080)
+TARGET_FPS = 144
 UP_DIR = (0, 1, 0)
 HELP_MSG = """
 ====================================================

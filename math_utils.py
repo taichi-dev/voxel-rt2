@@ -4,7 +4,23 @@ import numpy as np
 
 eps = 1e-4
 inf = 1e10
+vec3 = ti.types.vector(3, float)
 
+@ti.func
+def saturate(x):
+    return min(max(x, 0.0), 1.0)
+
+@ti.func
+def mix(x, y, k):
+    return x * (1.0 - k) + y * k
+
+@ti.func
+def sqr(x):
+    return x*x
+
+@ti.func
+def pow5(x):
+    return x*x*x*x*x
 
 @ti.func
 def out_dir(n):
@@ -13,7 +29,7 @@ def out_dir(n):
     a = 1.0 - 2.0 * u[0]
     b = ti.sqrt(1.0 - a * a)
     phi = 2.0 * np.pi * u[1]
-    return ti.Vector([n.x + b * ti.cos(phi), n.y + a, n.z + b * ti.sin(phi)])
+    return ti.Vector([n.x + b * ti.cos(phi), n.y + a, n.z + b * ti.sin(phi)]).normalized()
 
 
 @ti.func
