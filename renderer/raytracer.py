@@ -1,3 +1,4 @@
+from turtle import distance
 import taichi as ti
 import math
 from renderer.math_utils import eps, inf, ray_aabb_intersection
@@ -19,8 +20,7 @@ class VoxelOctreeRaytracer:
     def linearize_index(self, ipos, lod):
         base_idx = 0
         if lod > 0:
-            n = self.voxel_grid_res
-            n = n * n * n
+            n = ti.static(self.voxel_grid_res ** 3)
             #    Given the result must be integer
             #    And b >= 1, then
             #    n * sum(0..b, (0.5 ** b))
@@ -72,49 +72,45 @@ class VoxelOctreeRaytracer:
 
     @ti.func
     def raytrace(self, origin, direction, ray_min_t, ray_max_t):
+        # We assume ray_min_t and ray_max_t are within the voxel volume
         iters = 0
-
-        hit_distance = inf
-        voxel_index = ti.Vector([0, 0, 0])
-
         current_lod = 0
 
-        voxel_pos = origin + direction * max(0, ray_min_t + 5.0 * eps)
+        hit_distance = max(0.0, ray_min_t + eps * 5.0)
+        voxel_pos = origin + direction * hit_distance
+        ipos_lod0 = ti.cast(ti.floor(voxel_pos), ti.i32)
+        inv_dir = 1.0 / ti.abs(direction)
 
         while iters < 512:
-            ipos_lod0 = ti.cast(ti.floor(voxel_pos), ti.i32)
-            ipos = ipos_lod0 >> current_lod
-            sample = self.query_occupancy(ipos, current_lod)
+            if hit_distance > ray_max_t:
+                break
+
+            sample = self.query_occupancy(ipos_lod0 >> current_lod, current_lod)
             while sample and current_lod > 0:
                 # If we hit something, traverse down the LODs
                 # Until we reach LOD 0 or reach a empty cell
                 current_lod = current_lod - 1
-                ipos = ipos_lod0 >> current_lod
-                sample = self.query_occupancy(ipos, current_lod)
+                sample = self.query_occupancy(ipos_lod0 >> current_lod, current_lod)
 
-            lod_size = ti.cast(1 << current_lod, ti.f32)
-            cell_base = ti.cast(ipos << current_lod, ti.f32)
-            it, near, far = ray_aabb_intersection(
-                ti.math.vec3(0.0),
-                ti.math.vec3(lod_size),
-                origin - cell_base,
-                direction,
-            )
-
-            if near > ray_max_t:
+            if sample:
+                # If hit, exit loop
                 break
-
-            if sample and it:
-                # If at LOD = 0, we get a voxel hit
-                hit_distance = near
-                voxel_index = ipos
-                break
-            else:
-                # Move beyond the hit boundary
-                voxel_pos = origin + direction * (far + 10.0 * eps)
-                # No point going over the top lods
-                current_lod = min(max(0, self.n_lods - 2), current_lod + 1)
+            
+            # Find parametric edge distances (time to hit)
+            cell_size = 1 << current_lod
+            dist = voxel_pos - ti.cast(ipos_lod0 & (-cell_size), ti.f32)
+            for i in ti.static(range(3)):
+                if direction[i] > 0.0:
+                    dist[i] = cell_size - dist[i]
+            t = (dist + eps) * inv_dir
+            
+            # If empty, advance to the nearest edge & increment lod
+            min_t = ti.min(t.x, t.y, t.z)
+            hit_distance += min_t
+            voxel_pos = origin + direction * hit_distance
+            ipos_lod0 = ti.cast(ti.floor(voxel_pos), ti.i32)
+            current_lod = min(max(0, self.n_lods - 2), current_lod + 1)
 
             iters += 1
 
-        return hit_distance, voxel_pos, voxel_index, iters
+        return hit_distance, voxel_pos, ipos_lod0, iters

@@ -42,7 +42,10 @@ class Renderer:
 
         self.background_color = ti.Vector.field(3, dtype=ti.f32, shape=())
 
-        ti.root.dense(ti.ij, image_res).place(self.color_buffer)
+        # By interleaving with 16x8 blocks,
+        # each thread block will process 16x8 pixels in a batch instead of a 32 pixel row in a batch
+        # Thus we pay less divergence penalty on hard paths (e.g. voxel edges)
+        ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.color_buffer)
 
         self.voxel_grid_res = 128
         self.world = VoxelWorld(dx, self.voxel_grid_res, voxel_edges)
@@ -100,7 +103,8 @@ class Renderer:
     @ti.func
     def _trace_voxel(
         self, eye_pos, d, colors: ti.template(),
-        closest_hit_dist: ti.template(), normal: ti.template(), color: ti.template(), is_light: ti.template()
+        closest_hit_dist: ti.template(), normal: ti.template(), color: ti.template(), is_light: ti.template(),
+        shadow_ray: ti.template()
     ):
         # Return data for the voxel hit
         iters = 0
@@ -125,29 +129,30 @@ class Renderer:
                 eye_pos_scaled, d, scene_near, scene_far)
 
             # If the ray hits a voxel, get the surface data
-            if hit_distance < inf:
+            if hit_distance < scene_far:
                 # Re-scale from the voxel grid space back to world space
                 closest_hit_dist = hit_distance * self.world.voxel_size
-                voxel_index += self.world.voxel_grid_offset
-                voxel_uv = ti.math.fract(voxel_pos)
-                # Get surface data
-                color, is_light = self.world.voxel_surface_color(
-                    voxel_index, voxel_uv, colors)
-                # Get the distance from hit point to the surface (for computing normals)
-                surface_normal = ti.Vector([0.0, 0.0, 0.0])
-                dis = min(voxel_uv, 1.0 - voxel_uv)
-                if dis[0] <= dis[1] and dis[0] < dis[2]:
-                    surface_normal[0] = -ti.math.sign(d[0])
-                elif dis[1] <= dis[0] and dis[1] <= dis[2]:
-                    surface_normal[1] = -ti.math.sign(d[1])
-                else:
-                    surface_normal[2] = -ti.math.sign(d[2])
-                normal = surface_normal
+                if ti.static(not shadow_ray):
+                    voxel_index += self.world.voxel_grid_offset
+                    voxel_uv = ti.math.fract(voxel_pos)
+                    # Get surface data
+                    color, is_light = self.world.voxel_surface_color(
+                        voxel_index, voxel_uv, colors)
+                    # Get the distance from hit point to the surface (for computing normals)
+                    surface_normal = ti.Vector([0.0, 0.0, 0.0])
+                    dis = min(voxel_uv, 1.0 - voxel_uv)
+                    if dis[0] <= dis[1] and dis[0] < dis[2]:
+                        surface_normal[0] = -ti.math.sign(d[0])
+                    elif dis[1] <= dis[0] and dis[1] <= dis[2]:
+                        surface_normal[1] = -ti.math.sign(d[1])
+                    else:
+                        surface_normal[2] = -ti.math.sign(d[2])
+                    normal = surface_normal
 
         return voxel_index, iters
 
     @ti.func
-    def next_hit(self, pos, d, max_dist, colors: ti.template()):
+    def next_hit(self, pos, d, max_dist, colors: ti.template(), shadow_ray: ti.template()):
         # Hit Data
         closest_hit_dist = max_dist
         normal = ti.Vector([0.0, 0.0, 0.0])
@@ -156,19 +161,20 @@ class Renderer:
 
         # First intersect with voxel grid
         vx_idx, iters = self._trace_voxel(
-            pos, d, colors, closest_hit_dist, normal, albedo, hit_light)
+            pos, d, colors, closest_hit_dist, normal, albedo, hit_light, shadow_ray)
 
         # Then intersect with implicit SDF
         self._trace_sdf(pos, d, closest_hit_dist, normal, albedo, hit_light)
 
         # Highlight the selected voxel
-        if self.cast_voxel_hit[None]:
-            cast_vx_idx = self.cast_voxel_index[None]
-            if all(cast_vx_idx == vx_idx):
-                albedo = ti.Vector([1.0, 0.65, 0.0])
-                # For light sources, we actually invert the material to make it
-                # more obvious
-                hit_light = 1 - hit_light
+        if ti.static(not shadow_ray):
+            if self.cast_voxel_hit[None]:
+                cast_vx_idx = self.cast_voxel_index[None]
+                if all(cast_vx_idx == vx_idx):
+                    albedo = ti.Vector([1.0, 0.65, 0.0])
+                    # For light sources, we actually invert the material to make it
+                    # more obvious
+                    hit_light = 1 - hit_light
         return closest_hit_dist, normal, albedo, hit_light, iters
 
     @ti.kernel
@@ -246,7 +252,7 @@ class Renderer:
 
                 depth += 1
                 closest, normal, c, hit_light, iters = self.next_hit(
-                    pos, d, inf, colors)
+                    pos, d, inf, colors, shadow_ray=False)
                 hit_pos = pos + closest * d
                 # Enable this to debug iteration counts
                 if ti.static(False):
@@ -266,8 +272,9 @@ class Renderer:
                         dot = light_dir.dot(normal)
                         if dot > 0:
                             hit_light_ = 0
-                            dist, _, _, hit_light_, iters = self.next_hit(
-                                pos, light_dir, inf, colors
+                            iters_ = 0
+                            dist, _, _, hit_light_, iters_ = self.next_hit(
+                                pos, light_dir, inf, colors, shadow_ray=True
                             )
                             if dist > DIS_LIMIT:
                                 # far enough to hit directional light
