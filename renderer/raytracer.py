@@ -81,16 +81,23 @@ class VoxelOctreeRaytracer:
         ipos_lod0 = ti.cast(ti.floor(voxel_pos), ti.i32)
         inv_dir = 1.0 / ti.abs(direction)
 
+        hit_normal = ti.Vector([0, 0, 0])
+
         while iters < 512:
             if hit_distance > ray_max_t:
                 break
 
-            sample = self.query_occupancy(ipos_lod0 >> current_lod, current_lod)
-            while sample and current_lod > 0:
+            ipos = ti.Vector([0, 0, 0])
+            sample = 0
+            while True:
                 # If we hit something, traverse down the LODs
                 # Until we reach LOD 0 or reach a empty cell
-                current_lod = current_lod - 1
-                sample = self.query_occupancy(ipos_lod0 >> current_lod, current_lod)
+                ipos = ipos_lod0 >> current_lod
+                sample = self.query_occupancy(ipos, current_lod)
+                if sample and current_lod > 0:
+                    current_lod -= 1
+                else:
+                    break
 
             if sample:
                 # If hit, exit loop
@@ -98,19 +105,35 @@ class VoxelOctreeRaytracer:
             
             # Find parametric edge distances (time to hit)
             cell_size = 1 << current_lod
-            dist = voxel_pos - ti.cast(ipos_lod0 & (-cell_size), ti.f32)
+            cell_base = ipos * cell_size
+            frac_pos = voxel_pos - ti.cast(cell_base, ti.f32)
+            dist = frac_pos
             for i in ti.static(range(3)):
                 if direction[i] > 0.0:
                     dist[i] = cell_size - dist[i]
-            t = (dist + eps) * inv_dir
+            t = dist * inv_dir
             
-            # If empty, advance to the nearest edge & increment lod
+            # If empty, find intersection point with the nearest plane of current cell
             min_t = ti.min(t.x, t.y, t.z)
+            # The hit normal is the normal of the nearest plane
+            hit_normal = ti.cast(t == min_t, ti.i32) * ti.cast(ti.math.sign(direction), ti.i32)
+            # Advance floating point values
             hit_distance += min_t
-            voxel_pos = origin + direction * hit_distance
-            ipos_lod0 = ti.cast(ti.floor(voxel_pos), ti.i32)
-            current_lod = min(max(0, self.n_lods - 2), current_lod + 1)
+            voxel_pos += min_t * direction
+            # Compute the integer hit point within current cell
+            edge_frac_pos = ti.math.clamp(
+                ti.cast(ti.floor(frac_pos + min_t * direction), ti.i32),
+                0, cell_size - 1)
+            # Next cell would be `hit_point + hit_normal`. All integer thus water-tight
+            new_ipos_lod0 = cell_base + edge_frac_pos + hit_normal
+            # If we are crossing a LOD boundary, we need to traverse up the LODs
+            if current_lod < self.n_lods - 2 and \
+               any((ipos_lod0 >> (current_lod + 1)) == (new_ipos_lod0 >> (current_lod + 1))):
+                current_lod = current_lod + 1
+            ipos_lod0 = new_ipos_lod0
+            # Clamp the floating point values to integer water-tight results
+            voxel_pos = ti.math.clamp(voxel_pos, ti.cast(ipos_lod0, ti.f32), ti.cast(ipos_lod0 + 1, ti.f32))
 
             iters += 1
 
-        return hit_distance, voxel_pos, ipos_lod0, iters
+        return hit_distance, voxel_pos, ipos_lod0, ti.cast(-hit_normal, ti.f32), iters

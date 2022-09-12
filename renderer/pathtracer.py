@@ -125,7 +125,7 @@ class Renderer:
         if inter:
             # Setting the near to voxel grid AABB intersection distance,
             # so that we don't waste time outside of the voxel grid
-            hit_distance, voxel_pos, voxel_index, iters = self.voxel_raytracer.raytrace(
+            hit_distance, voxel_pos, voxel_index, hit_normal, iters = self.voxel_raytracer.raytrace(
                 eye_pos_scaled, d, scene_near, scene_far)
 
             # If the ray hits a voxel, get the surface data
@@ -138,16 +138,7 @@ class Renderer:
                     # Get surface data
                     color, is_light = self.world.voxel_surface_color(
                         voxel_index, voxel_uv, colors)
-                    # Get the distance from hit point to the surface (for computing normals)
-                    surface_normal = ti.Vector([0.0, 0.0, 0.0])
-                    dis = min(voxel_uv, 1.0 - voxel_uv)
-                    if dis[0] <= dis[1] and dis[0] < dis[2]:
-                        surface_normal[0] = -ti.math.sign(d[0])
-                    elif dis[1] <= dis[0] and dis[1] <= dis[2]:
-                        surface_normal[1] = -ti.math.sign(d[1])
-                    else:
-                        surface_normal[2] = -ti.math.sign(d[2])
-                    normal = surface_normal
+                    normal = hit_normal
 
         return voxel_index, iters
 
