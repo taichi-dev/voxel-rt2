@@ -106,39 +106,23 @@ class Renderer:
         closest_hit_dist: ti.template(), normal: ti.template(), color: ti.template(), is_light: ti.template(),
         shadow_ray: ti.template()
     ):
-        # Return data for the voxel hit
-        iters = 0
-        voxel_index = ti.math.ivec3(0)
-
         # Re-scale the ray origin from world space to voxel grid space [0, voxel_grid_res)
-        bbox_min = self.world.voxel_inv_size * \
-            self.world.bbox[0] - self.world.voxel_grid_offset
-        bbox_max = self.world.voxel_inv_size * \
-            self.world.bbox[1] - self.world.voxel_grid_offset
-        eye_pos_scaled = self.world.voxel_inv_size * \
-            eye_pos - self.world.voxel_grid_offset
-        inter, scene_near, scene_far = ray_aabb_intersection(
-            bbox_min, bbox_max, eye_pos_scaled, d
-        )
+        eye_pos_scaled = self.world.voxel_inv_size * eye_pos - self.world.voxel_grid_offset
 
-        # If the ray hits the bounding box, trace the voxel grid
-        if inter:
-            # Setting the near to voxel grid AABB intersection distance,
-            # so that we don't waste time outside of the voxel grid
-            hit_distance, voxel_index, hit_normal, iters = self.voxel_raytracer.raytrace(
-                eye_pos_scaled, d, scene_near, scene_far)
+        hit_distance, voxel_index, hit_normal, iters = self.voxel_raytracer.raytrace(
+            eye_pos_scaled, d, eps, inf)
 
-            # If the ray hits a voxel, get the surface data
-            if hit_distance < scene_far:
-                # Re-scale from the voxel grid space back to world space
-                closest_hit_dist = hit_distance * self.world.voxel_size
-                if ti.static(not shadow_ray):
-                    voxel_uv = ti.math.fract(ti.math.clamp(eye_pos_scaled + hit_distance * d, voxel_index, voxel_index + 1))
-                    voxel_index += self.world.voxel_grid_offset
-                    # Get surface data
-                    color, is_light = self.world.voxel_surface_color(
-                        voxel_index, voxel_uv, colors)
-                    normal = hit_normal
+        # If the ray hits a voxel, get the surface data
+        if hit_distance < inf:
+            # Re-scale from the voxel grid space back to world space
+            closest_hit_dist = hit_distance * self.world.voxel_size
+            if ti.static(not shadow_ray):
+                voxel_uv = ti.math.clamp(eye_pos_scaled + hit_distance * d - voxel_index, 0.0, 1.0)
+                voxel_index += self.world.voxel_grid_offset
+                # Get surface data
+                color, is_light = self.world.voxel_surface_color(
+                    voxel_index, voxel_uv, colors)
+                normal = hit_normal
 
         return voxel_index, iters
 
