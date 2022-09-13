@@ -125,7 +125,7 @@ class Renderer:
         if inter:
             # Setting the near to voxel grid AABB intersection distance,
             # so that we don't waste time outside of the voxel grid
-            hit_distance, voxel_pos, voxel_index, hit_normal, iters = self.voxel_raytracer.raytrace(
+            hit_distance, voxel_index, hit_normal, iters = self.voxel_raytracer.raytrace(
                 eye_pos_scaled, d, scene_near, scene_far)
 
             # If the ray hits a voxel, get the surface data
@@ -133,8 +133,8 @@ class Renderer:
                 # Re-scale from the voxel grid space back to world space
                 closest_hit_dist = hit_distance * self.world.voxel_size
                 if ti.static(not shadow_ray):
+                    voxel_uv = ti.math.fract(ti.math.clamp(eye_pos_scaled + hit_distance * d, voxel_index, voxel_index + 1))
                     voxel_index += self.world.voxel_grid_offset
-                    voxel_uv = ti.math.fract(voxel_pos)
                     # Get surface data
                     color, is_light = self.world.voxel_surface_color(
                         voxel_index, voxel_uv, colors)
