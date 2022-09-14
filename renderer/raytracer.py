@@ -70,12 +70,14 @@ class VoxelOctreeRaytracer:
                     ti.atomic_or(self.occupancy[idx >> 5], bit)
 
     @ti.func
-    def raytrace(self, origin, direction, ray_min_t, ray_max_t):
+    def raytrace(self, origin, _direction, ray_min_t, ray_max_t):
         # Initialize result to be empty
         hit_distance = inf
         ipos_lod0 = ti.Vector([-1, -1, -1])
         hit_normal = ti.Vector([0, 0, 0])
         iters = 0
+
+        direction = _direction.normalized()
 
         # Check the bounding box of the entire volume
         bbox_intersect, bbox_near, bbox_far = ray_aabb_intersection(
