@@ -146,7 +146,7 @@ class VoxelOctreeRaytracer:
                 hit_normal = ti.cast(t == min_t, ti.i32) * ti.cast(ti.math.sign(direction), ti.i32)
                 # Next cell would be `hit_point + hit_normal`. All integer thus water-tight
                 ipos_lod0 = cell_base + edge_frac_pos + hit_normal
-                current_lod = current_lod + 1
+                current_lod = ti.min(self.n_lods - 1, current_lod + 1)
 
                 iters += 1
 
