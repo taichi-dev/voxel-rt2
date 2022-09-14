@@ -1,8 +1,8 @@
 from scene import Scene; import taichi as ti; from taichi.math import *
-day = True; manual_seed = 77
+day = False; manual_seed = 77
 scene = Scene(voxel_edges=0, exposure=2 - day)
 scene.set_floor(-0.05, (1.0, 1.0, 1.0))
-scene.set_background_color((0.9, 0.98, 1) if day else (0.01, 0.01, 0.02))
+scene.set_background_color((0.5, 0.6, 0.7) if day else (0.01, 0.01, 0.02))
 scene.set_directional_light((1, 1, 1), 0.1, (0.9, 0.98, 1) if day else (0.01, 0.01, 0.02))
 lgrid, ngrid = 15, 8
 
@@ -36,8 +36,8 @@ def build_road(X, uv, d):
         if d.sum() > 3 or uv.x <= 7:
             uv = vec2(mix(14-uv.x, uv.x, uv.x <= 7), mix(14-uv.y, uv.y, uv.y <= 7))
             uv = vec2(uv.norm(), ti.atan2(uv.x, uv.y)*2/pi*lgrid)
-    scene.set_voxel(vec3(X.x, 0, X.y), 1, vec3(1 if uv.x==7 and 4<uv.y<12 else 0.5)) # pavement
-    if uv.x <= 1 or uv.x >= 13: scene.set_voxel(ivec3(X.x, 1, X.y), 1, vec3(0.7, 0.65, 0.6)) # sidewalk
+    scene.set_voxel(vec3(X.x, 0, X.y), 10, vec3(1 if uv.x==7 and 4<uv.y<12 else 0.5)) # pavement
+    if uv.x <= 1 or uv.x >= 13: scene.set_voxel(ivec3(X.x, 1, X.y), 11, vec3(0.7, 0.65, 0.6)) # sidewalk
     if uv.y == 7 and (uv.x == 1 or uv.x == 13): # lights
         for i in range(2, 9): scene.set_voxel(vec3(X.x, i, X.y), 1, vec3(0.6, 0.6, 0.6))
     if uv.y == 7 and (1<=uv.x<=2 or 12<=uv.x<=13): scene.set_voxel(vec3(X.x, 8, X.y), 1, vec3(0.6, 0.6, 0.6))
@@ -57,9 +57,9 @@ def build_building(X, uv, d, r):
                 scene.set_voxel(vec3(X.x, i, X.y), 1, wall)
         if maxdist < 5:  scene.set_voxel(vec3(X.x, i, X.y), mix(1, 2, i%4<2), mix(wall, light, i%4<2))
     if maxdist == 5:
-        for i in range(fl*4, fl*4+2): scene.set_voxel(vec3(X.x, i, X.y), 1, wall) # roof
-    if maxdist < 5: scene.set_voxel(vec3(X.x, fl*4, X.y), 1, vec3(rand(r, 7)*0.2+0.4))
-    for i in range(2): scene.set_voxel(vec3(X.x, i, X.y), 1, vec3(0.7, 0.65, 0.6)) # sidewalk
+        for i in range(fl*4, fl*4+2): scene.set_voxel(vec3(X.x, i, X.y), 11, wall) # roof
+    if maxdist < 5: scene.set_voxel(vec3(X.x, fl*4, X.y), 11, vec3(rand(r, 7)*0.2+0.4))
+    for i in range(2): scene.set_voxel(vec3(X.x, i, X.y), 10, vec3(0.7, 0.65, 0.6)) # sidewalk
     if fl > 10 and uv.x == 6 and uv.y == 6: # antenna
         for i in range(fl+1):
             scene.set_voxel(vec3(X.x, fl*5-i, X.y), mix(1, 2, i==0), mix(vec3(0.6), vec3(0.8,0,0), i==0))

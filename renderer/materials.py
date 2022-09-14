@@ -2,6 +2,9 @@ import taichi as ti
 from renderer.math_utils import (eps, inf, vec3, sqr)
 from renderer.bsdf import DisneyBSDF
 
+import numpy as np
+import csv
+
 # All of our hardcoded materials here
 
 
@@ -45,116 +48,64 @@ from renderer.bsdf import DisneyBSDF
 
 @ti.data_oriented
 class MaterialList:
+    @ti.kernel
+    def init_all_to_default(self):
+        for i in self.mat_list:
+            self.mat_list[i] = self.bsdf.disney_material(base_col=vec3([1.0,1.0,1.0]) \
+                                        ,subsurface=0.0 \
+                                        ,metallic=0.0 \
+                                        ,specular=0.04 \
+                                        ,specular_tint=0.0 \
+                                        ,roughness=0.9 \
+                                        ,anisotropic=0.0 \
+                                        ,sheen=0.0 \
+                                        ,sheen_tint=0.0 \
+                                        ,clearcoat=0.0 \
+                                        ,clearcoat_gloss=0.0)
+    
+    @ti.kernel
+    def load_from_csv(self, data : ti.types.ndarray(element_dim=1)):
+        for i in data:
+            mat_values = data[i]
+            index = ti.cast(mat_values[0], ti.i32)
+            base_col = vec3([mat_values[1], mat_values[2], mat_values[3]])
+            subsurface = mat_values[4]
+            metallic = mat_values[5]
+            specular = mat_values[6]
+            specular_tint = mat_values[7]
+            roughness = mat_values[8]
+            anisotropic = mat_values[9]
+            sheen = mat_values[10]
+            sheen_tint = mat_values[11]
+            clearcoat = mat_values[12]
+            clearcoat_gloss = mat_values[13]
+            self.mat_list[index] = self.bsdf.disney_material( \
+                                         base_col=base_col \
+                                        ,subsurface=subsurface \
+                                        ,metallic=metallic \
+                                        ,specular=specular \
+                                        ,specular_tint=specular_tint \
+                                        ,roughness=roughness \
+                                        ,anisotropic=anisotropic \
+                                        ,sheen=sheen \
+                                        ,sheen_tint=sheen_tint \
+                                        ,clearcoat=clearcoat \
+                                        ,clearcoat_gloss=clearcoat_gloss)
+
     def __init__(self) -> None:
         self.bsdf = DisneyBSDF()
         self.mat_list = self.bsdf.disney_material.field(shape=(128,))
 
-        self.simple_rough_surface = self.bsdf.disney_material(base_col=vec3([1.0,1.0,1.0]) \
-                                        ,subsurface=0.0 \
-                                        ,metallic=0.0 \
-                                        ,specular=0.0 \
-                                        ,specular_tint=0.0 \
-                                        ,roughness=1.0 \
-                                        ,anisotropic=0.0 \
-                                        ,sheen=0.0 \
-                                        ,sheen_tint=0.0 \
-                                        ,clearcoat=0.0 \
-                                        ,clearcoat_gloss=0.0)
+        self.init_all_to_default()
 
-        self.mat_list[1] = self.simple_rough_surface
+        materials_array = []
+        with open('default_material_set.csv', newline='') as csvfile:
+            reader = csv.reader(csvfile, delimiter=',')
+            i = 0
+            for row in reader:
+                if i > 0:
+                    materials_array.append([float(x) for x in row])
+                i += 1
+        materials_array = np.array(materials_array).astype(np.float32)
 
-        self.mat_list[2] = self.bsdf.disney_material(base_col=vec3([1.0,1.0,1.0]) \
-                                        ,subsurface=0.0 \
-                                        ,metallic=0.0 \
-                                        ,specular=0.0 \
-                                        ,specular_tint=0.0 \
-                                        ,roughness=1.0 \
-                                        ,anisotropic=0.0 \
-                                        ,sheen=0.0 \
-                                        ,sheen_tint=0.0 \
-                                        ,clearcoat=0.0 \
-                                        ,clearcoat_gloss=0.0)
-
-        self.mat_list[10] = self.bsdf.disney_material(base_col=vec3([1.0,1.0,1.0]) \
-                                        ,subsurface=0.0 \
-                                        ,metallic=0.0 \
-                                        ,specular=0.3 \
-                                        ,specular_tint=0.0 \
-                                        ,roughness=0.6 \
-                                        ,anisotropic=0.0 \
-                                        ,sheen=0.0 \
-                                        ,sheen_tint=0.0 \
-                                        ,clearcoat=0.0 \
-                                        ,clearcoat_gloss=0.0)
-
-        self.mat_list[11] = self.bsdf.disney_material(base_col=vec3([1.0,1.0,1.0]) \
-                                        ,subsurface=0.0 \
-                                        ,metallic=0.0 \
-                                        ,specular=0.3 \
-                                        ,specular_tint=0.0 \
-                                        ,roughness=0.2 \
-                                        ,anisotropic=0.0 \
-                                        ,sheen=0.0 \
-                                        ,sheen_tint=0.0 \
-                                        ,clearcoat=0.0 \
-                                        ,clearcoat_gloss=0.0)
-
-        self.mat_list[20] = self.bsdf.disney_material(base_col=vec3([1.0,1.0,1.0]) \
-                                        ,subsurface=0.9 \
-                                        ,metallic=0.0 \
-                                        ,specular=0.5 \
-                                        ,specular_tint=0.2 \
-                                        ,roughness=0.04 \
-                                        ,anisotropic=0.0 \
-                                        ,sheen=0.0 \
-                                        ,sheen_tint=0.0 \
-                                        ,clearcoat=0.0 \
-                                        ,clearcoat_gloss=0.0)
-
-        self.mat_list[21] = self.bsdf.disney_material(base_col=vec3([1.0,1.0,1.0]) \
-                                        ,subsurface=0.5 \
-                                        ,metallic=0.0 \
-                                        ,specular=0.6 \
-                                        ,specular_tint=0.0 \
-                                        ,roughness=0.6 \
-                                        ,anisotropic=0.0 \
-                                        ,sheen=0.0 \
-                                        ,sheen_tint=0.0 \
-                                        ,clearcoat=1.0 \
-                                        ,clearcoat_gloss=0.99)
-
-        self.mat_list[22] = self.bsdf.disney_material(base_col=vec3([1.0,1.0,1.0]) \
-                                        ,subsurface=0.5 \
-                                        ,metallic=0.0 \
-                                        ,specular=0.6 \
-                                        ,specular_tint=0.0 \
-                                        ,roughness=0.6 \
-                                        ,anisotropic=0.0 \
-                                        ,sheen=0.0 \
-                                        ,sheen_tint=0.0 \
-                                        ,clearcoat=0.0 \
-                                        ,clearcoat_gloss=0.0)
-
-        self.mat_list[30] = self.bsdf.disney_material(base_col=vec3([1.0,1.0,1.0]) \
-                                        ,subsurface=0.3 \
-                                        ,metallic=0.0 \
-                                        ,specular=0.2 \
-                                        ,specular_tint=0.0 \
-                                        ,roughness=0.6 \
-                                        ,anisotropic=0.0 \
-                                        ,sheen=0.4 \
-                                        ,sheen_tint=0.5 \
-                                        ,clearcoat=0.0 \
-                                        ,clearcoat_gloss=0.0)
-
-        self.mat_list[31] = self.bsdf.disney_material(base_col=vec3([1.0,1.0,1.0]) \
-                                        ,subsurface=0.3 \
-                                        ,metallic=0.0 \
-                                        ,specular=0.5 \
-                                        ,specular_tint=0.0 \
-                                        ,roughness=0.5 \
-                                        ,anisotropic=0.0 \
-                                        ,sheen=0.4 \
-                                        ,sheen_tint=0.0 \
-                                        ,clearcoat=0.0 \
-                                        ,clearcoat_gloss=0.0)
+        self.load_from_csv(materials_array)
