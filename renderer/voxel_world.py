@@ -1,4 +1,5 @@
 import taichi as ti
+from renderer.bsdf import DisneyBSDF
 
 @ti.data_oriented
 class VoxelWorld:
@@ -43,6 +44,7 @@ class VoxelWorld:
             f = 1.0
 
         voxel_color = ti.Vector([0.0, 0.0, 0.0])
+        voxel_material = 0
         is_light = 0
         if self.inside_grid(voxel_index):
             data = colors.fetch((voxel_index - self.voxel_grid_offset).zyx, 0)
@@ -51,7 +53,7 @@ class VoxelWorld:
             if voxel_material == 2:
                 is_light = 1
 
-        return voxel_color * (1.3 - 1.2 * f), is_light
+        return voxel_color * (1.3 - 1.2 * f), is_light, voxel_material
 
     @ti.kernel
     def _recompute_bbox(self):

@@ -4,7 +4,15 @@ import numpy as np
 
 eps = 1e-4
 inf = 1e10
+vec3 = ti.types.vector(3, float)
 
+@ti.func
+def saturate(x):
+    return min(max(x, 0.0), 1.0)
+
+@ti.func
+def sqr(x):
+    return x*x
 
 @ti.func
 def sample_cosine_weighted_hemisphere(n):
@@ -36,7 +44,8 @@ def sample_cone(cos_theta_max):
 
 @ti.func
 def sample_cone_oriented(cos_theta_max, n):
-    return make_tangent_space(n) @ sample_cone(cos_theta_max)
+    mat_dir = make_tangent_space(n) @ sample_cone(cos_theta_max)
+    return ti.Vector([mat_dir[0, 0], mat_dir[1, 0], mat_dir[2, 0]])
 
 @ti.func
 def interleave_bits_z3(v: ti.u32):

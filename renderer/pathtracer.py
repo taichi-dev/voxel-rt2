@@ -1,6 +1,9 @@
 import math
 import taichi as ti
+import numpy as np
 
+from renderer.bsdf import DisneyBSDF
+from renderer.materials import MaterialList
 from renderer.voxel_world import VoxelWorld
 from renderer.raytracer import VoxelOctreeRaytracer
 from renderer.math_utils import *
@@ -58,6 +61,9 @@ class Renderer:
         self.floor_height[None] = 0
         self.floor_color[None] = (1, 1, 1)
 
+        self.bsdf = DisneyBSDF()
+        self.mats = MaterialList()
+
     def set_directional_light(self, direction, light_cone_angle, light_color):
         direction_norm = (
             direction[0] ** 2 + direction[1] ** 2 + direction[2] ** 2
@@ -112,6 +118,7 @@ class Renderer:
         hit_distance, voxel_index, hit_normal, iters = self.voxel_raytracer.raytrace(
             eye_pos_scaled, d, eps, inf)
 
+        mat_id = 0
         # If the ray hits a voxel, get the surface data
         if hit_distance < inf:
             # Re-scale from the voxel grid space back to world space
@@ -120,11 +127,11 @@ class Renderer:
                 voxel_uv = ti.math.clamp(eye_pos_scaled + hit_distance * d - voxel_index, 0.0, 1.0)
                 voxel_index += self.world.voxel_grid_offset
                 # Get surface data
-                color, is_light = self.world.voxel_surface_color(
+                color, is_light, mat_id = self.world.voxel_surface_color(
                     voxel_index, voxel_uv, colors)
                 normal = hit_normal
 
-        return voxel_index, iters
+        return voxel_index, iters, mat_id
 
     @ti.func
     def next_hit(self, pos, d, max_dist, colors: ti.template(), shadow_ray: ti.template()):
@@ -135,7 +142,7 @@ class Renderer:
         hit_light = 0
 
         # First intersect with voxel grid
-        vx_idx, iters = self._trace_voxel(
+        vx_idx, iters, mat_id = self._trace_voxel(
             pos, d, colors, closest_hit_dist, normal, albedo, hit_light, shadow_ray)
 
         # Then intersect with implicit SDF
@@ -150,7 +157,7 @@ class Renderer:
                     # For light sources, we actually invert the material to make it
                     # more obvious
                     hit_light = 1 - hit_light
-        return closest_hit_dist, normal, albedo, hit_light, iters
+        return closest_hit_dist, normal, albedo, hit_light, iters, mat_id
 
     @ti.kernel
     def set_camera_pos(self, x: ti.f32, y: ti.f32, z: ti.f32):
@@ -205,6 +212,7 @@ class Renderer:
 
     @ti.kernel
     def render(self, n_spp: ti.i32, colors: ti.types.texture(3)):
+
         # Render
         ti.loop_config(block_dim=128)
         for u, v in self.color_buffer:
@@ -215,7 +223,7 @@ class Renderer:
                 pos,
                 contrib,
                 throughput,
-                c,
+                albedo,
                 depth,
                 hit_light,
                 hit_background,
@@ -226,9 +234,11 @@ class Renderer:
                 sample_complete = False
 
                 depth += 1
-                closest, normal, c, hit_light, iters = self.next_hit(
+                closest, normal, albedo, hit_light, iters, mat_id = self.next_hit(
                     pos, d, inf, colors, shadow_ray=False)
+                hit_mat = self.mats.mat_list[mat_id]
                 hit_pos = pos + closest * d
+
                 # Enable this to debug iteration counts
                 if ti.static(False):
                     if depth == 1:
@@ -236,10 +246,16 @@ class Renderer:
                         best_case_iters = ti.simt.subgroup.reduce_min(iters)
                         self.color_buffer[u, v] += ti.Vector(
                             [worst_case_iters / 64.0, best_case_iters / 64.0, 0.0])
+
                 if not hit_light and normal.norm() != 0 and closest < 1e8:
-                    d = sample_cosine_weighted_hemisphere(normal)
                     pos = hit_pos + normal * eps
-                    throughput *= c
+                    hit_mat.base_col = albedo
+                    view = -d
+
+                    tang = normal.cross(vec3([0.0, 1.0, 1.0])).normalized()
+                    bitang = tang.cross(normal)
+
+                    d, brdf, pdf = self.bsdf.sample_disney(hit_mat, view, normal, tang, bitang)
 
                     if ti.static(use_directional_light):
                         light_dir = sample_cone_oriented(
@@ -247,16 +263,19 @@ class Renderer:
                         dot = light_dir.dot(normal)
                         if dot > 0:
                             hit_light_ = 0
-                            iters_ = 0
-                            dist, _, _, hit_light_, iters_ = self.next_hit(
+                            dist, _, _, hit_light_, iters, smat = self.next_hit(
                                 pos, light_dir, inf, colors, shadow_ray=True
                             )
                             if dist > DIS_LIMIT:
                                 # far enough to hit directional light
-                                contrib += throughput * \
-                                    self.light_color[None] * dot
+                                light_brdf = self.bsdf.disney_evaluate(hit_mat, view, normal, light_dir, tang, bitang)
+                                contrib += throughput * light_brdf * self.light_color[None] * np.pi * dot
+                    
+                    # Apply weight to throughput
+                    throughput *= ti.math.clamp(brdf * saturate(d.dot(normal)) / pdf, 0.0, 999999.0)
                 else:  # hit background or light voxel, terminate tracing
                     hit_background = 1
+                    contrib += throughput * self.background_color[None]
                     sample_complete = True
 
                 # Russian roulette
@@ -273,7 +292,7 @@ class Renderer:
                 # Tracing end
                 if sample_complete:
                     if hit_light:
-                        contrib += throughput * c
+                        contrib += throughput * albedo
                     else:
                         if depth == 1 and hit_background:
                             # Direct hit to background
@@ -285,7 +304,7 @@ class Renderer:
                         pos,
                         contrib,
                         throughput,
-                        c,
+                        albedo,
                         depth,
                         hit_light,
                         hit_background,
