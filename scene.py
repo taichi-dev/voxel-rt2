@@ -146,9 +146,10 @@ class Scene:
         mat, color = self.renderer.get_voxel(self.round_idx(idx))
         return mat, color
 
-    def set_floor(self, height, color):
+    def set_floor(self, height, color, material=1):
         self.renderer.floor_height[None] = height
         self.renderer.floor_color[None] = color
+        self.renderer.floor_material[None] = material
 
     def set_directional_light(self, direction, direction_noise, color):
         self.renderer.set_directional_light(direction, direction_noise, color)

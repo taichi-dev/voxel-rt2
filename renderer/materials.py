@@ -26,7 +26,7 @@ import csv
 ######   Wood   ######
 # 30 = Bark
 # 31 = Wood plank
-# 31 = Gloss coated wood plank
+# 32 = Gloss coated wood plank
 #
 ######   Plastic   ######
 # 40 = Smooth plastic

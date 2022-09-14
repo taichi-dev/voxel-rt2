@@ -42,6 +42,7 @@ class Renderer:
 
         self.floor_height = ti.field(dtype=ti.f32, shape=())
         self.floor_color = ti.Vector.field(3, dtype=ti.f32, shape=())
+        self.floor_material = ti.field(dtype=ti.i32, shape=())
 
         self.background_color = ti.Vector.field(3, dtype=ti.f32, shape=())
 
@@ -60,6 +61,7 @@ class Renderer:
 
         self.floor_height[None] = 0
         self.floor_color[None] = (1, 1, 1)
+        self.floor_material[None] = 1
 
         self.bsdf = DisneyBSDF()
         self.mats = MaterialList()
@@ -95,7 +97,7 @@ class Renderer:
     @ti.func
     def _trace_sdf(
         self, pos, dir, closest_hit_dist: ti.template(),
-        normal: ti.template(), color: ti.template(), is_light: ti.template()
+        normal: ti.template(), color: ti.template(), is_light: ti.template(), mat_id : ti.template()
     ):
         # Ray marching
         ray_march_dist = self._sdf_march(pos, dir)
@@ -104,7 +106,8 @@ class Renderer:
             hit_pos = pos + dir * closest_hit_dist
             normal = self._sdf_normal(hit_pos)
             color = self._sdf_color(hit_pos)
-            is_light = 0
+            is_light = self.floor_material[None] == 2
+            mat_id = self.floor_material[None]
 
     @ti.func
     def _trace_voxel(
@@ -146,7 +149,7 @@ class Renderer:
             pos, d, colors, closest_hit_dist, normal, albedo, hit_light, shadow_ray)
 
         # Then intersect with implicit SDF
-        self._trace_sdf(pos, d, closest_hit_dist, normal, albedo, hit_light)
+        self._trace_sdf(pos, d, closest_hit_dist, normal, albedo, hit_light, mat_id)
 
         # Highlight the selected voxel
         if ti.static(not shadow_ray):

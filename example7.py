@@ -1,7 +1,7 @@
 from scene import Scene; import taichi as ti; from taichi.math import *
-day = False; manual_seed = 77
+day = True; manual_seed = 77
 scene = Scene(voxel_edges=0, exposure=2 - day)
-scene.set_floor(-0.05, (1.0, 1.0, 1.0))
+scene.set_floor(-0.05, (1.0, 1.0, 1.0), 20)
 scene.set_background_color((0.5, 0.6, 0.7) if day else (0.01, 0.01, 0.02))
 scene.set_directional_light((1, 1, 1), 0.1, (0.9, 0.98, 1) if day else (0.01, 0.01, 0.02))
 lgrid, ngrid = 15, 8
@@ -39,8 +39,8 @@ def build_road(X, uv, d):
     scene.set_voxel(vec3(X.x, 0, X.y), 10, vec3(1 if uv.x==7 and 4<uv.y<12 else 0.5)) # pavement
     if uv.x <= 1 or uv.x >= 13: scene.set_voxel(ivec3(X.x, 1, X.y), 11, vec3(0.7, 0.65, 0.6)) # sidewalk
     if uv.y == 7 and (uv.x == 1 or uv.x == 13): # lights
-        for i in range(2, 9): scene.set_voxel(vec3(X.x, i, X.y), 1, vec3(0.6, 0.6, 0.6))
-    if uv.y == 7 and (1<=uv.x<=2 or 12<=uv.x<=13): scene.set_voxel(vec3(X.x, 8, X.y), 1, vec3(0.6, 0.6, 0.6))
+        for i in range(2, 9): scene.set_voxel(vec3(X.x, i, X.y), 50, vec3(0.6, 0.6, 0.6))
+    if uv.y == 7 and (1<=uv.x<=2 or 12<=uv.x<=13): scene.set_voxel(vec3(X.x, 8, X.y), 50, vec3(0.6, 0.6, 0.6))
     if uv.y == 7 and (uv.x == 2 or uv.x == 12): scene.set_voxel(vec3(X.x, 7, X.y), 2, vec3(1, 1, 0.6))
 @ti.func
 def build_building(X, uv, d, r):
@@ -52,17 +52,17 @@ def build_building(X, uv, d, r):
     for i in range(2, fl * 4):
         light = mix(vec3(0.25,0.35,0.38), vec3(0.7,0.7,0.6), rand(rand(X.x, X.y), i//2)>0.6)
         if maxdist < 6:
-            scene.set_voxel(vec3(X.x, i, X.y), mix(1, 0, i%4<2), mix(wall2, light, i%4<2))
+            scene.set_voxel(vec3(X.x, i, X.y), mix(10, 0, i%4<2), mix(wall2, light, i%4<2))
             if (uv.x == 2 or uv.x == 12) and (uv.y == 2 or uv.y == 12) or style>0.5 and (uv.x%3==1 or uv.y%3==1):
-                scene.set_voxel(vec3(X.x, i, X.y), 1, wall)
-        if maxdist < 5:  scene.set_voxel(vec3(X.x, i, X.y), mix(1, 2, i%4<2), mix(wall, light, i%4<2))
+                scene.set_voxel(vec3(X.x, i, X.y), 10, wall)
+        if maxdist < 5:  scene.set_voxel(vec3(X.x, i, X.y), mix(10, 2, i%4<2), mix(wall, light, i%4<2))
     if maxdist == 5:
         for i in range(fl*4, fl*4+2): scene.set_voxel(vec3(X.x, i, X.y), 11, wall) # roof
     if maxdist < 5: scene.set_voxel(vec3(X.x, fl*4, X.y), 11, vec3(rand(r, 7)*0.2+0.4))
     for i in range(2): scene.set_voxel(vec3(X.x, i, X.y), 10, vec3(0.7, 0.65, 0.6)) # sidewalk
     if fl > 10 and uv.x == 6 and uv.y == 6: # antenna
         for i in range(fl+1):
-            scene.set_voxel(vec3(X.x, fl*5-i, X.y), mix(1, 2, i==0), mix(vec3(0.6), vec3(0.8,0,0), i==0))
+            scene.set_voxel(vec3(X.x, fl*5-i, X.y), mix(50, 2, i==0), mix(vec3(0.6), vec3(0.8,0,0), i==0))
     if d.sum() > 0 and uv.y == 2 and 4 < uv.x < 10: # billboard
         for i in range(5, 7):
             scene.set_voxel(vec3(X.x,i,X.y), 2, vec3(int(r*3)==0,int(r*3)==1,int(r*3)==2)*(0.2+ti.random()*0.3))
@@ -70,18 +70,18 @@ def build_building(X, uv, d, r):
     if d.sum() > 0 and uv.y == 3 and 4 < uv.x < 10:
         for i in range(2, 5): scene.set_voxel(vec3(X.x,i,X.y), 1, vec3(0.7,0.7,0.6))
     if max(abs(uv.x - rand(r, 8)*7-4), abs(uv.y - rand(r, 10)*7-4)) < 1.5: # HVAC
-        for i in range(fl*4+1, fl*4+3): scene.set_voxel(vec3(X.x, i, X.y), 1, vec3(0.6))
+        for i in range(fl*4+1, fl*4+3): scene.set_voxel(vec3(X.x, i, X.y), 51, vec3(0.6))
 @ti.func
 def build_park(X, uv, d, r):
     center, height = int(vec2(rand(r, 1) * 7 + 4, rand(r, 2) * 7 + 4)), 9 + int(rand(r, 3)) * 5
     for i in range(height + 3): # tree
         if (uv - center).norm() < 1:
-            scene.set_voxel(vec3(X.x, i, X.y), 1, vec3(0.36, 0.18, 0.06))
+            scene.set_voxel(vec3(X.x, i, X.y), 30, vec3(0.36, 0.18, 0.06))
         if i > min(height-4, (height+5)//2) and (uv - center).norm() < (height+3-i) * (rand(r, 4)*0.6 + 0.4):
-            scene.set_voxel(vec3(X.x, i, X.y), ti.random()<0.8, vec3(0.1, 0.3 + ti.random()*0.2, 0.1))
+            scene.set_voxel(vec3(X.x, i, X.y), 80 if ti.random()<0.8 else 0, vec3(0.1, 0.3 + ti.random()*0.2, 0.1))
     h = 2 * ti.sin((uv.x**2+uv.y**2+rand(r, 0)**2*256)/1024 * 2*pi) + 2 + (ti.random() > 0.95)
     for i in range(int(h)): # grass
-        scene.set_voxel(vec3(X.x, i, X.y), 1, vec3(0.2, 0.5 + ti.random() * 0.2, 0.05))
+        scene.set_voxel(vec3(X.x, i, X.y), 80, vec3(0.2, 0.5 + ti.random() * 0.2, 0.05))
     if max(abs(uv.x - rand(r, 4)*7-4), abs(uv.y - rand(r, 5)*7-4)) < 0.5: # light
         for i in range(3):
             scene.set_voxel(vec3(X.x, h+i, X.y), 1+(i==1), mix(vec3(0.2),vec3(0.9,0.8,0.6),vec3(i==1)))
