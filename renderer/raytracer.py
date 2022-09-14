@@ -90,18 +90,18 @@ class VoxelOctreeRaytracer:
             # We are on or inside the bbox
             # Prepare DDA data
             initial_p = origin + direction * (hit_distance + eps)
-            ipos_lod0 = ti.cast(ti.floor(initial_p), ti.i32)
+            ipos_lod0 = ti.math.clamp(ti.cast(ti.floor(initial_p), ti.i32), 0, self.voxel_grid_res - 1)
             inv_dir = 1.0 / ti.abs(direction)
             current_lod = 0
-            far = min(ray_max_t, bbox_far)
+            far = min(ray_max_t, bbox_far) - eps
 
             # Compute initial normal in case we hit boundry voxels
             initial_dist = ti.abs(initial_p - self.voxel_grid_res * 0.5)
             max_dist = ti.max(initial_dist.x, initial_dist.y, initial_dist.z)
             hit_normal = ti.cast(max_dist == initial_dist, ti.i32)
             
-            while True:
-                if hit_distance >= far:
+            while iters < 512:
+                if hit_distance > far:
                     hit_distance = inf
                     break
 
