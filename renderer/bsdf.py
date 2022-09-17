@@ -24,7 +24,8 @@ class DisneyBSDF:
                                                 ,sheen=float \
                                                 ,sheen_tint=float \
                                                 ,clearcoat=float \
-                                                ,clearcoat_gloss=float)
+                                                ,clearcoat_gloss=float \
+                                                ,ior_minus_one=float)
 
     @ti.func
     def disneySubsurface(self, mat, n_dot_l, n_dot_v, l_dot_h, F_L, F_V):
@@ -93,6 +94,35 @@ class DisneyBSDF:
         F = self.disney_fresnel(mat, l_dot_h)
 
         return D * G* F# / max(4.0 * n_dot_l * n_dot_v, 1e-5)
+
+    @ti.func
+    def sclick_fresnel(v_dot_h, n1, n2):
+        F_0 = sqr((n1-n2)/(n1+n2))
+        return F_0 + (1 - F_0) * pow(1.0 - v_dot_h, 5.0)
+
+    @ti.func
+    def disney_spec_trans(self, mat, \
+                         n_dot_l, n_dot_v, \
+                         l_dot_h, n_dot_h, \
+                         h_dot_x, h_dot_y, \
+                         l_dot_x, l_dot_y, \
+                         v_dot_x, v_dot_y, v_dot_h, \
+                         tang, bitang, n1, n2):
+        aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
+
+        ax = max(sqr(mat.roughness) / aspect, 1e-3)
+        ay = max(sqr(mat.roughness) * aspect, 1e-3)
+
+        D = self.GTR2_anisotropic(n_dot_h, h_dot_x, h_dot_y, ax, ay)
+        G = self.smithG_GGX_aniso(n_dot_l, l_dot_x, l_dot_y, ax, ay) \
+            * self.smithG_GGX_aniso(n_dot_v, v_dot_x, v_dot_y, ax, ay)
+        F = self.sclick_fresnel(v_dot_h, n1, n2)
+
+        eta = n1/n2
+
+        a = (abs(l_dot_h) * abs(v_dot_h)) / (abs(n_dot_l) * abs(n_dot_v))
+        b = (1.0 / sqr(l_dot_h + eta * v_dot_h))
+        return mat.base_col * a * b * (1.0 - F) * G * D
 
     @ti.func
     def GTR1(self, n_dot_h, alpha):

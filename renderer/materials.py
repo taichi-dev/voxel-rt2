@@ -61,7 +61,8 @@ class MaterialList:
                                         ,sheen=0.0 \
                                         ,sheen_tint=0.0 \
                                         ,clearcoat=0.0 \
-                                        ,clearcoat_gloss=0.0)
+                                        ,clearcoat_gloss=0.0 \
+                                        ,ior_minus_one=0.0)
     
     @ti.kernel
     def load_from_csv(self, data : ti.types.ndarray(element_dim=1)):
@@ -79,6 +80,7 @@ class MaterialList:
             sheen_tint = mat_values[11]
             clearcoat = mat_values[12]
             clearcoat_gloss = mat_values[13]
+            ior_minus_one = mat_values[14]
             self.mat_list[index] = self.bsdf.disney_material( \
                                          base_col=base_col \
                                         ,subsurface=subsurface \
@@ -90,7 +92,8 @@ class MaterialList:
                                         ,sheen=sheen \
                                         ,sheen_tint=sheen_tint \
                                         ,clearcoat=clearcoat \
-                                        ,clearcoat_gloss=clearcoat_gloss)
+                                        ,clearcoat_gloss=clearcoat_gloss \
+                                        ,ior_minus_one=ior_minus_one)
 
     def __init__(self) -> None:
         self.bsdf = DisneyBSDF()
