@@ -53,7 +53,7 @@ class VoxelWorld:
             if voxel_material == 2:
                 is_light = 1
 
-        return voxel_color * (1.3 - 1.2 * f), is_light, voxel_material
+        return voxel_color * (1.0 - 0.9 * f), is_light, voxel_material
 
     @ti.kernel
     def _recompute_bbox(self):
