@@ -35,8 +35,8 @@ class Camera:
     def mouse_exclusive_owner(self):
         return True
 
-    def update_camera(self):
-        res = self._update_by_wasd()
+    def update_camera(self, delta_time):
+        res = self._update_by_wasd(delta_time)
         res = self._update_by_mouse() or res
         return res
 
@@ -66,7 +66,7 @@ class Camera:
 
         return True
 
-    def _update_by_wasd(self):
+    def _update_by_wasd(self, delta_time):
         win = self._window
         tgtdir = self.target_dir
         leftdir = self._compute_left_dir(tgtdir)
@@ -86,7 +86,7 @@ class Camera:
                 dir += np.array(d)
         if not pressed:
             return False
-        dir *= 0.05
+        dir *= delta_time
         self._lookat_pos += dir
         self._camera_pos += dir
         return True
@@ -166,14 +166,17 @@ class Scene:
         enable_gui = True
         current_fov = self.renderer.fov[None]
         initial_t = time.time()
+        last_t = initial_t
         while self.window.running:
             should_reset_framebuffer = False
 
-            if self.camera.update_camera():
+            t = time.time()
+            if self.camera.update_camera(t - last_t):
                 self.renderer.set_camera_pos(*self.camera.position)
                 look_at = self.camera.look_at
                 self.renderer.set_look_at(*look_at)
                 should_reset_framebuffer = True
+            last_t = t
 
             if should_reset_framebuffer:
                 self.renderer.reset_framebuffer()
