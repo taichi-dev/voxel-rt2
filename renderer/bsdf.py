@@ -3,7 +3,7 @@ import math
 import taichi as ti
 from taichi.math import *
 import numpy as np
-from renderer.math_utils import (eps, inf, vec3, sqr, saturate, sample_cosine_weighted_hemisphere)
+from renderer.math_utils import (eps, inf, sqr, saturate, sample_cosine_weighted_hemisphere)
 from taichi.math import (mix, reflect, refract)
 
 
@@ -317,8 +317,6 @@ class DisneyBSDF:
 
         if isinf(pdf) or isnan(pdf):
             pdf = 1.0
-
-        pdf = max(pdf, 1e-3)
 
         return sample_dir, brdf, pdf
 

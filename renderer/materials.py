@@ -1,5 +1,5 @@
 import taichi as ti
-from renderer.math_utils import (eps, inf, vec3, sqr)
+from renderer.math_utils import (eps, inf, sqr)
 from renderer.bsdf import DisneyBSDF
 
 import numpy as np
@@ -51,7 +51,7 @@ class MaterialList:
     @ti.kernel
     def init_all_to_default(self):
         for i in self.mat_list:
-            self.mat_list[i] = self.bsdf.disney_material(base_col=vec3([1.0,1.0,1.0]) \
+            self.mat_list[i] = self.bsdf.disney_material(base_col=ti.math.vec3([1.0,1.0,1.0]) \
                                         ,subsurface=0.0 \
                                         ,metallic=0.0 \
                                         ,specular=0.04 \
@@ -69,7 +69,7 @@ class MaterialList:
         for i in data:
             mat_values = data[i]
             index = ti.cast(mat_values[0], ti.i32)
-            base_col = vec3([mat_values[1], mat_values[2], mat_values[3]])
+            base_col = ti.math.vec3([mat_values[1], mat_values[2], mat_values[3]])
             subsurface = mat_values[4]
             metallic = mat_values[5]
             specular = mat_values[6]

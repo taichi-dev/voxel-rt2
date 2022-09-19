@@ -4,7 +4,6 @@ import numpy as np
 
 eps = 1e-6
 inf = np.inf
-vec3 = ti.types.vector(3, float)
 
 @ti.func
 def saturate(x):

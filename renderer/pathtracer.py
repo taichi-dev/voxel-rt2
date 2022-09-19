@@ -9,7 +9,7 @@ from renderer.voxel_world import VoxelWorld
 from renderer.raytracer import VoxelOctreeRaytracer
 from renderer.math_utils import *
 
-MAX_RAY_DEPTH = 4
+MAX_RAY_DEPTH = 6
 use_directional_light = True
 
 RADIANCE_CLAMP = 3200.0
@@ -119,12 +119,11 @@ class Renderer:
 
         hit_distance, voxel_index, hit_normal, iters = self.voxel_raytracer.raytrace(
             eye_pos_scaled, d, eps, inf)
-        hit_distance *= self.world.voxel_size
 
         # If the ray hits a voxel, get the surface data
-        if hit_distance < closest_hit_dist:
+        if hit_distance * self.world.voxel_size < closest_hit_dist:
             # Re-scale from the voxel grid space back to world space
-            closest_hit_dist = hit_distance
+            closest_hit_dist = hit_distance * self.world.voxel_size
             if ti.static(not shadow_ray):
                 voxel_uv = ti.math.clamp(eye_pos_scaled + hit_distance * d - voxel_index, 0.0, 1.0)
                 voxel_index += self.world.voxel_grid_offset
@@ -207,11 +206,10 @@ class Renderer:
         contrib = ti.Vector([0.0, 0.0, 0.0])
         throughput = ti.Vector([1.0, 1.0, 1.0])
 
-        depth = 0
         hit_light = 0
         hit_background = 0
 
-        return d, pos, contrib, throughput, depth, hit_light, hit_background
+        return d, pos, contrib, throughput, hit_light, hit_background
 
     @ti.kernel
     def render(self, colors: ti.types.texture(3)):
@@ -224,15 +222,12 @@ class Renderer:
                 pos,
                 contrib,
                 throughput,
-                depth,
                 hit_light,
                 hit_background,
             ) = self.generate_new_sample(u, v)
 
             # Tracing begin
-            sample_complete = False
-            while not sample_complete:
-                depth += 1
+            for depth in range(MAX_RAY_DEPTH):
                 closest, normal, albedo, hit_light, iters, mat_id = self.next_hit(
                     pos, d, inf, colors, shadow_ray=False)
                 hit_mat = self.mats.mat_list[mat_id]
@@ -246,15 +241,13 @@ class Renderer:
                         self.color_buffer[u, v] += ti.Vector(
                             [worst_case_iters / 64.0, best_case_iters / 64.0, 0.0])
 
-                if not hit_light and normal.norm() != 0 and closest < 1e8:
+                if not hit_light and closest < inf:
                     pos = hit_pos + normal * eps
                     hit_mat.base_col = albedo
                     view = -d
 
                     tang = normal.cross(vec3([0.0, 1.0, 1.0])).normalized()
                     bitang = tang.cross(normal)
-
-                    d, brdf, pdf = self.bsdf.sample_disney(hit_mat, view, normal, tang, bitang)
 
                     if ti.static(use_directional_light):
                         light_dir = sample_cone_oriented(
@@ -270,33 +263,30 @@ class Renderer:
                                 light_brdf = self.bsdf.disney_evaluate(hit_mat, view, normal, light_dir, tang, bitang)
                                 contrib += firefly_filter(throughput * light_brdf * self.light_color[None] * np.pi * dot)
                     
+                    # Sample next bounce
+                    d, brdf, pdf = self.bsdf.sample_disney(hit_mat, view, normal, tang, bitang)
+
                     # Apply weight to throughput
                     throughput *= brdf * saturate(d.dot(normal)) / pdf
-                else:  # hit background or light voxel, terminate tracing
-                    hit_background = 1
-                    contrib += firefly_filter(throughput * self.background_color[None])
-                    sample_complete = True
+                    throughput = clamp(throughput, 0.0, 1e5)
+                else:
+                    if closest == inf:
+                        # Hit background
+                        contrib += firefly_filter(throughput * self.background_color[None])
+                    else:
+                        # hit light voxel, terminate tracing
+                        contrib += throughput * albedo
+                    break
 
                 # Russian roulette
                 max_c = clamp(throughput.max(), 0.0, 1.0)
                 if ti.random() > max_c:
-                    throughput = [0, 0, 0]
-                    sample_complete = True
+                    break
                 else:
                     throughput /= max_c
 
-                if depth >= MAX_RAY_DEPTH:
-                    sample_complete = True
+            self.color_buffer[u, v] += contrib
 
-                # Tracing end
-                if sample_complete:
-                    if hit_light:
-                        contrib += throughput * albedo
-                    else:
-                        if depth == 1 and hit_background:
-                            # Direct hit to background
-                            contrib = self.background_color[None]
-                    self.color_buffer[u, v] += contrib
 
     @ti.kernel
     def _render_to_image(self, img : ti.types.rw_texture(num_dimensions=2, num_channels=4, channel_format=ti.f32, lod=0), samples: ti.i32):
