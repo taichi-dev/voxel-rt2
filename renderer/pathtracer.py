@@ -98,9 +98,10 @@ class Renderer:
         ray_march_dist = self._sdf_march(pos, dir)
         if ray_march_dist > eps and ray_march_dist < closest_hit_dist:
             hit_pos = pos + dir * ray_march_dist
-            if length(hit_pos) < 10.0:
+            sdf_normal = self._sdf_normal(hit_pos)
+            if length(hit_pos - dot(hit_pos, sdf_normal)) < 10.0:
                 closest_hit_dist = ray_march_dist
-                normal = self._sdf_normal(hit_pos)
+                normal = sdf_normal
                 if normal.dot(dir) > 0:
                     normal = -normal
                 color = self._sdf_color(hit_pos)
