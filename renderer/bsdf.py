@@ -4,7 +4,7 @@ import taichi as ti
 from taichi.math import *
 import numpy as np
 from renderer.math_utils import (eps, inf, vec3, sqr, saturate, sample_cosine_weighted_hemisphere)
-from taichi.math import (mix, reflect)
+from taichi.math import (mix, reflect, refract)
 
 
 # references:
@@ -103,30 +103,6 @@ class DisneyBSDF:
         return F_0 + (1 - F_0) * pow(1.0 - v_dot_h, 5.0)
 
     @ti.func
-    def disney_spec_trans(self, mat, \
-                         n_dot_l, n_dot_v, \
-                         l_dot_h, n_dot_h, \
-                         h_dot_x, h_dot_y, \
-                         l_dot_x, l_dot_y, \
-                         v_dot_x, v_dot_y, v_dot_h, \
-                         tang, bitang, n1, n2):
-        aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
-
-        ax = max(sqr(mat.roughness) / aspect, 1e-3)
-        ay = max(sqr(mat.roughness) * aspect, 1e-3)
-
-        D = self.GTR2_anisotropic(n_dot_h, h_dot_x, h_dot_y, ax, ay)
-        G = self.smithG_GGX_aniso(n_dot_l, l_dot_x, l_dot_y, ax, ay) \
-            * self.smithG_GGX_aniso(n_dot_v, v_dot_x, v_dot_y, ax, ay)
-        F = self.sclick_fresnel(v_dot_h, n1, n2)
-
-        eta = n1/n2
-
-        a = (abs(l_dot_h) * abs(v_dot_h)) / (abs(n_dot_l) * abs(n_dot_v))
-        b = (1.0 / sqr(l_dot_h + eta * v_dot_h))
-        return mat.base_col * a * b * (1.0 - F) * G * D
-
-    @ti.func
     def GTR1(self, n_dot_h, alpha):
         
         a2 = alpha*alpha
@@ -220,12 +196,7 @@ class DisneyBSDF:
         return sampled_dir, pdf
 
     @ti.func
-    def sample_specular(self, mat, v, n, tang, bitang):
-
-        aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
-
-        ax = max(sqr(mat.roughness) / aspect, 1e-3)
-        ay = max(sqr(mat.roughness) * aspect, 1e-3)
+    def GGX_VNDF_aniso(self, mat, v, n, tang, bitang, ax, ay):
 
         u = ti.Vector([ti.random(), ti.random()])
         # ggx vndf
@@ -247,6 +218,18 @@ class DisneyBSDF:
         m = m.x * tang + m.z * bitang + m.y * n
 
         if(m.dot(v) < 0.0): m *= -1.0
+
+        return m
+
+    @ti.func
+    def sample_specular(self, mat, v, n, tang, bitang):
+
+        aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
+
+        ax = max(sqr(mat.roughness) / aspect, 1e-3)
+        ay = max(sqr(mat.roughness) * aspect, 1e-3)
+
+        m = self.GGX_VNDF_aniso(mat, v, n, tang, bitang, ax, ay)
 
         sampled_dir = reflect(-v, m)
 
@@ -293,6 +276,7 @@ class DisneyBSDF:
         else:
             sample_dir, pdf = self.sample_clearcoat(mat, v, n, tang, bitang)
             chosenLobe = 2
+
         
         # compute brdf inputs
         n_dot_l = n.dot(sample_dir)
@@ -312,6 +296,8 @@ class DisneyBSDF:
 
         v_dot_x = (v.dot(tang))
         v_dot_y = (v.dot(bitang))
+
+        v_dot_h = (v.dot(h))
 
         if(chosenLobe == 0):
             brdf += self.disney_diffuse(mat, n_dot_l, n_dot_v, l_dot_h) * (1.0 - mat.metallic)
@@ -335,3 +321,204 @@ class DisneyBSDF:
         pdf = max(pdf, 1e-3)
 
         return sample_dir, brdf, pdf
+
+    @ti.func
+    def translucent_specular(self, mat, \
+                        n_dot_l, n_dot_v, \
+                        l_dot_h, n_dot_h, \
+                        h_dot_x, h_dot_y, \
+                        l_dot_x, l_dot_y, \
+                        v_dot_x, v_dot_y, v_dot_h, \
+                        tang, bitang, n1, n2): # specular REFLECTION
+        
+        aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
+
+        ax = max(sqr(mat.roughness) / aspect, 1e-3)
+        ay = max(sqr(mat.roughness) * aspect, 1e-3)
+
+        D = self.GTR2_anisotropic(n_dot_h, h_dot_x, h_dot_y, ax, ay)
+        G = self.smithG_GGX_aniso(n_dot_l, l_dot_x, l_dot_y, ax, ay) \
+        * self.smithG_GGX_aniso(n_dot_v, v_dot_x, v_dot_y, ax, ay)
+        F = self.sclick_fresnel(v_dot_h, n1, n2)
+
+        return D * G* F# / max(4.0 * n_dot_l * n_dot_v, 1e-5)
+
+    @ti.func
+    def translucent_transmission(self, mat, \
+                         n_dot_l, n_dot_v, \
+                         l_dot_h, n_dot_h, \
+                         h_dot_x, h_dot_y, \
+                         l_dot_x, l_dot_y, \
+                         v_dot_x, v_dot_y, v_dot_h, \
+                         tang, bitang, n1, n2):
+        aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
+
+        ax = max(sqr(mat.roughness) / aspect, 1e-3)
+        ay = max(sqr(mat.roughness) * aspect, 1e-3)
+
+        D = self.GTR2_anisotropic(n_dot_h, h_dot_x, h_dot_y, ax, ay)
+        G = self.smithG_GGX_aniso(n_dot_l, l_dot_x, l_dot_y, ax, ay) \
+            * self.smithG_GGX_aniso(n_dot_v, v_dot_x, v_dot_y, ax, ay)
+        F = self.sclick_fresnel(v_dot_h, n1, n2)
+
+        eta = n1/n2
+
+        a = (abs(l_dot_h) * abs(v_dot_h)) / (abs(n_dot_l) * abs(n_dot_v))
+        b = (1.0 / sqr(l_dot_h + eta * v_dot_h))
+        return mat.base_col * a * b * (1.0 - F) * G * D
+
+    @ti.func
+    def evaluate_translucent_bsdf(self, mat, v, n, l, tang, bitang, n1):
+        n2 = 1.0 + mat.ior_minus_one
+        eta = n1 / n2
+
+        n_dot_l = n.dot(l)
+        n_dot_v = (n.dot(v))
+
+        bsdf = vec3([0.0, 0.0, 0.0])
+
+        in_upper_hemisphere = n_dot_l > 0.0 and n_dot_v > 0.0
+
+        if n_dot_l > 0 and n_dot_v > 0:
+
+            h = l + v
+            h = h.normalized()
+
+            l_dot_h = (l.dot(h))
+            n_dot_h = (n.dot(h))
+
+            h_dot_x = (h.dot(tang))
+            h_dot_y = (h.dot(bitang))
+
+            l_dot_x = (l.dot(tang))
+            l_dot_y = (l.dot(bitang))
+
+            v_dot_x = (v.dot(tang))
+            v_dot_y = (v.dot(bitang))
+
+            v_dot_h = v.dot(h)
+
+            if(in_upper_hemisphere):
+                bsdf += self.translucent_specular(mat, \
+                                n_dot_l, n_dot_v, \
+                                l_dot_h, n_dot_h, \
+                                h_dot_x, h_dot_y, \
+                                l_dot_x, l_dot_y, \
+                                v_dot_x, v_dot_y, v_dot_h, \
+                                tang, bitang, n1, n2)
+                bsdf += self.disney_clearcoat(mat, n_dot_l, n_dot_v, n_dot_h, l_dot_h)
+            else:
+                bsdf += self.translucent_transmission(mat, \
+                         n_dot_l, n_dot_v, \
+                         l_dot_h, n_dot_h, \
+                         h_dot_x, h_dot_y, \
+                         l_dot_x, l_dot_y, \
+                         v_dot_x, v_dot_y, v_dot_h, \
+                         tang, bitang, n1, n2)
+        return bsdf
+
+    @ti.func
+    def sample_translucent(self, mat, v, n, tang, bitang, n1):
+        # set lobe probabilities
+        translucent_w = 1.0
+        clearcoat_w = mat.clearcoat*0.5
+        
+        n2 = 1.0 + mat.ior_minus_one
+        eta = n1 / n2
+
+        w_sum = clearcoat_w + translucent_w
+
+        clearcoat_w /= w_sum
+        translucent_w /= w_sum
+
+        # choose a lobe
+        sample_dir = vec3([1.0, 1.0, 1.0])
+        bsdf = vec3([0.0, 0.0, 0.0])
+        pdf = 1.0
+        rand = ti.random()
+        chosenLobe = -1
+        if(rand < clearcoat_w):
+            sample_dir, pdf = self.sample_clearcoat(mat, v, n, tang, bitang)
+            chosenLobe = 0
+        else:
+            aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
+
+            ax = max(sqr(mat.roughness) / aspect, 1e-3)
+            ay = max(sqr(mat.roughness) * aspect, 1e-3)
+
+            m = self.GGX_VNDF_aniso(mat, v, n, tang, bitang, ax, ay)
+
+            F = self.sclick_fresnel(v.dot(m), n1, n2)
+
+            # compute pdf
+            
+            n_dot_v = (n.dot(v))
+            n_dot_h = (n.dot(m))
+            h_dot_x = (m.dot(tang))
+            h_dot_y = (m.dot(bitang))
+            v_dot_x = (v.dot(tang))
+            v_dot_y = (v.dot(bitang))
+            D = self.GTR2_anisotropic(n_dot_h, h_dot_x, h_dot_y, ax, ay)
+            G = self.smithG_GGX_aniso(n_dot_v, v_dot_x, v_dot_y, ax, ay)
+            
+            if(ti.random() < F):
+                sampled_dir = reflect(-v, m)
+
+                n_dot_l = abs(n.dot(sampled_dir))
+                l_dot_h = abs(sampled_dir.dot(m))
+
+                pdf = F * G * l_dot_h * D / n_dot_l
+                chosenLobe = 1
+            else:
+                sampled_dir = refract(-v, m, eta)
+
+                n_dot_l = abs(n.dot(sampled_dir))
+                l_dot_h = abs(sampled_dir.dot(m))
+
+                pdf = (1.0 - F) * G * l_dot_h * D / n_dot_l
+                chosenLobe = 2
+        
+        # compute brdf inputs
+        n_dot_l = n.dot(sample_dir)
+        n_dot_v = (n.dot(v))
+
+        h = sample_dir + v
+        h = h.normalized()
+
+        l_dot_h = (sample_dir.dot(h))
+        n_dot_h = (n.dot(h))
+
+        h_dot_x = (h.dot(tang))
+        h_dot_y = (h.dot(bitang))
+
+        l_dot_x = (sample_dir.dot(tang))
+        l_dot_y = (sample_dir.dot(bitang))
+
+        v_dot_x = (v.dot(tang))
+        v_dot_y = (v.dot(bitang))
+
+        v_dot_h = (v.dot(h))
+
+        if(chosenLobe == 0):
+            bsdf += self.disney_clearcoat(mat, n_dot_l, n_dot_v, n_dot_h, l_dot_h)
+            pdf *= clearcoat_w
+        elif(chosenLobe == 1):
+            brdf += self.translucent_specular(mat, \
+                                n_dot_l, n_dot_v, \
+                                l_dot_h, n_dot_h, \
+                                h_dot_x, h_dot_y, \
+                                l_dot_x, l_dot_y, \
+                                v_dot_x, v_dot_y, v_dot_h, \
+                                tang, bitang, n1, n2)
+            pdf *= translucent_w
+        else:
+            brdf += self.translucent_transmission(mat, \
+                         n_dot_l, n_dot_v, \
+                         l_dot_h, n_dot_h, \
+                         h_dot_x, h_dot_y, \
+                         l_dot_x, l_dot_y, \
+                         v_dot_x, v_dot_y, v_dot_h, \
+                         tang, bitang, n1, n2)
+            pdf *= translucent_w
+
+        return sample_dir, bsdf, pdf
