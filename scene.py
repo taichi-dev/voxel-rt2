@@ -112,7 +112,7 @@ class Camera:
 
 class Scene:
     def __init__(self, voxel_edges=0.06, exposure=3):
-        ti.init(arch=ti.vulkan, log_level="trace")
+        ti.init(arch=ti.vulkan)
         print(HELP_MSG)
         self.window = ti.ui.Window("Taichi Voxel Renderer", SCREEN_RES, vsync=False)
         self.camera = Camera(self.window, up=UP_DIR)

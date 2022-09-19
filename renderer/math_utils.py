@@ -2,8 +2,8 @@ import math
 import taichi as ti
 import numpy as np
 
-eps = 1e-4
-inf = 1e10
+eps = 1e-6
+inf = np.inf
 vec3 = ti.types.vector(3, float)
 
 @ti.func

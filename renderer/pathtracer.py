@@ -78,9 +78,7 @@ class Renderer:
 
     @ti.func
     def _sdf_march(self, p, d):
-        dist = inf
-        if d[1] < -eps:
-            dist = (self.floor_height[None] - p[1]) / d[1]
+        dist = (self.floor_height[None] - p[1]) / d[1]
         return dist
 
     @ti.func
@@ -98,18 +96,21 @@ class Renderer:
     ):
         # Ray marching
         ray_march_dist = self._sdf_march(pos, dir)
-        if ray_march_dist < 100.0 and ray_march_dist < closest_hit_dist:
-            closest_hit_dist = ray_march_dist
-            hit_pos = pos + dir * closest_hit_dist
-            normal = self._sdf_normal(hit_pos)
-            color = self._sdf_color(hit_pos)
-            is_light = self.floor_material[None] == 2
-            mat_id = self.floor_material[None]
+        if ray_march_dist > eps and ray_march_dist < closest_hit_dist:
+            hit_pos = pos + dir * ray_march_dist
+            if length(hit_pos) < 10.0:
+                closest_hit_dist = ray_march_dist
+                normal = self._sdf_normal(hit_pos)
+                if normal.dot(dir) > 0:
+                    normal = -normal
+                color = self._sdf_color(hit_pos)
+                is_light = self.floor_material[None] == 2
+                mat_id = self.floor_material[None]
 
     @ti.func
     def _trace_voxel(
         self, eye_pos, d, colors: ti.template(),
-        closest_hit_dist: ti.template(), normal: ti.template(), color: ti.template(), is_light: ti.template(),
+        closest_hit_dist: ti.template(), normal: ti.template(), color: ti.template(), is_light: ti.template(), mat_id : ti.template(),
         shadow_ray: ti.template()
     ):
         # Re-scale the ray origin from world space to voxel grid space [0, voxel_grid_res)
@@ -117,12 +118,12 @@ class Renderer:
 
         hit_distance, voxel_index, hit_normal, iters = self.voxel_raytracer.raytrace(
             eye_pos_scaled, d, eps, inf)
+        hit_distance *= self.world.voxel_size
 
-        mat_id = 0
         # If the ray hits a voxel, get the surface data
-        if hit_distance < inf:
+        if hit_distance < closest_hit_dist:
             # Re-scale from the voxel grid space back to world space
-            closest_hit_dist = hit_distance * self.world.voxel_size
+            closest_hit_dist = hit_distance
             if ti.static(not shadow_ray):
                 voxel_uv = ti.math.clamp(eye_pos_scaled + hit_distance * d - voxel_index, 0.0, 1.0)
                 voxel_index += self.world.voxel_grid_offset
@@ -131,7 +132,7 @@ class Renderer:
                     voxel_index, voxel_uv, colors)
                 normal = hit_normal
 
-        return voxel_index, iters, mat_id
+        return voxel_index, iters
 
     @ti.func
     def next_hit(self, pos, d, max_dist, colors: ti.template(), shadow_ray: ti.template()):
@@ -140,13 +141,14 @@ class Renderer:
         normal = ti.Vector([0.0, 0.0, 0.0])
         albedo = ti.Vector([0.0, 0.0, 0.0])
         hit_light = 0
+        mat_id = 0
 
-        # First intersect with voxel grid
-        vx_idx, iters, mat_id = self._trace_voxel(
-            pos, d, colors, closest_hit_dist, normal, albedo, hit_light, shadow_ray)
-
-        # Then intersect with implicit SDF
+        # Intersect with implicit SDF
         self._trace_sdf(pos, d, closest_hit_dist, normal, albedo, hit_light, mat_id)
+
+        # Then intersect with voxel grid
+        vx_idx, iters = self._trace_voxel(
+            pos, d, colors, closest_hit_dist, normal, albedo, hit_light, mat_id, shadow_ray)
 
         # Highlight the selected voxel
         if ti.static(not shadow_ray):
@@ -157,6 +159,7 @@ class Renderer:
                     # For light sources, we actually invert the material to make it
                     # more obvious
                     hit_light = 1 - hit_light
+
         return closest_hit_dist, normal, albedo, hit_light, iters, mat_id
 
     @ti.kernel
@@ -261,7 +264,7 @@ class Renderer:
                             dist, _, _, hit_light_, iters, smat = self.next_hit(
                                 pos, light_dir, inf, colors, shadow_ray=True
                             )
-                            if dist == inf:
+                            if dist >= inf:
                                 # far enough to hit directional light
                                 light_brdf = self.bsdf.disney_evaluate(hit_mat, view, normal, light_dir, tang, bitang)
                                 contrib += firefly_filter(throughput * light_brdf * self.light_color[None] * np.pi * dot)
