@@ -35,7 +35,7 @@ def create_leaves(pos, radius, color):
         if prob < 0.1:
             prob = 0.0
         if ti.random() < prob:
-            scene.set_voxel(pos + I, 1, color + (ti.random() - 0.5) * 0.2)
+            scene.set_voxel(pos + I, 80, color + (ti.random() - 0.5) * 0.2)
 
 
 @ti.func

@@ -10,7 +10,7 @@ import __main__
 
 VOXEL_DX = 1 / 64
 SCREEN_RES = (1920, 1080)
-TARGET_FPS = 144
+TARGET_FPS = 60
 UP_DIR = (0, 1, 0)
 HELP_MSG = """
 ====================================================
@@ -115,7 +115,7 @@ class Scene:
     def __init__(self, voxel_edges=0.06, exposure=3):
         ti.init(arch=ti.vulkan)
         print(HELP_MSG)
-        self.window = ti.ui.Window("Taichi Voxel Renderer", SCREEN_RES, vsync=True)
+        self.window = ti.ui.Window("Taichi Voxel Renderer", SCREEN_RES, vsync=False)
         self.camera = Camera(self.window, up=UP_DIR)
         self.renderer = Renderer(
             dx=VOXEL_DX,
@@ -160,8 +160,12 @@ class Scene:
     def finish(self):
         self.renderer.prepare_data()
         canvas = self.window.get_canvas()
+        gui = self.window.get_gui()
         spp = 1
         samples = 0
+        last_1k_samples_time = 0.0
+        enable_gui = True
+        current_fov = self.renderer.fov[None]
         initial_t = time.time()
         last_t = initial_t
         while self.window.running:
@@ -190,9 +194,26 @@ class Scene:
             #     print(f"Screenshot has been saved to {fname}")
             canvas.set_image(img)
             if samples > 1024:
-                print("1024 samples took", time.time() - initial_t)
+                last_1k_samples_time = time.time() - initial_t
+                print("1024 samples took", last_1k_samples_time)
                 samples = 0
                 initial_t = time.time()
+
+            if self.window.is_pressed("g"):
+                enable_gui = not enable_gui
+
+            if enable_gui:
+                with gui.sub_window("Settings", x=0.05, y=0.05, width=0.25, height=0.2) as g:
+                    g.text("Press G to show/hide GUI")
+                    g.text(f"Last 1024 samples took {last_1k_samples_time:.3f}s")
+                    g.text(f"Current adaptive SPP: {spp}")
+                    new_fow = np.deg2rad(g.slider_float("Verticle FOV", np.rad2deg(current_fov), 1.0, 90.0))
+                    if new_fow != current_fov:
+                        current_fov = new_fow
+                        self.renderer.fov[None] = current_fov
+                    global TARGET_FPS
+                    TARGET_FPS = g.slider_int("Target FPS", TARGET_FPS, 24, 240)
+
             self.window.show()
 
             t = time.time()

@@ -1,5 +1,6 @@
 import math
 import taichi as ti
+from taichi.math import *
 import numpy as np
 
 from renderer.bsdf import DisneyBSDF
@@ -11,8 +12,11 @@ from renderer.math_utils import *
 MAX_RAY_DEPTH = 4
 use_directional_light = True
 
-DIS_LIMIT = 100
+RADIANCE_CLAMP = 3200.0
 
+@ti.func
+def firefly_filter(v):
+    return clamp(v, 0.0, RADIANCE_CLAMP)
 
 @ti.data_oriented
 class Renderer:
@@ -57,7 +61,7 @@ class Renderer:
 
         self._rendered_image = ti.Texture(ti.f32, 4, self.image_res)
         self.set_up(*up)
-        self.set_fov(0.23)
+        self.set_fov(np.deg2rad(30.0))
 
         self.floor_height[None] = 0
         self.floor_color[None] = (1, 1, 1)
@@ -67,14 +71,7 @@ class Renderer:
         self.mats = MaterialList()
 
     def set_directional_light(self, direction, light_cone_angle, light_color):
-        direction_norm = (
-            direction[0] ** 2 + direction[1] ** 2 + direction[2] ** 2
-        ) ** 0.5
-        self.light_direction[None] = (
-            direction[0] / direction_norm,
-            direction[1] / direction_norm,
-            direction[2] / direction_norm,
-        )
+        self.light_direction[None] = ti.Vector(direction).normalized()
         # Theta is half-angle of the light cone
         self.light_cone_cos_theta_max[None] = math.cos(light_cone_angle * 0.5)
         self.light_color[None] = light_color
@@ -101,7 +98,7 @@ class Renderer:
     ):
         # Ray marching
         ray_march_dist = self._sdf_march(pos, dir)
-        if ray_march_dist < DIS_LIMIT and ray_march_dist < closest_hit_dist:
+        if ray_march_dist < 100.0 and ray_march_dist < closest_hit_dist:
             closest_hit_dist = ray_march_dist
             hit_pos = pos + dir * closest_hit_dist
             normal = self._sdf_normal(hit_pos)
@@ -180,14 +177,14 @@ class Renderer:
 
     @ti.func
     def get_cast_dir(self, u, v):
-        fov = self.fov[None]
+        half_fov = self.fov[None] * 0.5
         d = (self.look_at[None] - self.camera_pos[None]).normalized()
         fu = (
-            2 * fov * (u + ti.random(ti.f32)) / self.image_res[1]
-            - fov * self.aspect_ratio
+            2 * half_fov * (u + ti.random(ti.f32)) / self.image_res[1]
+            - half_fov * self.aspect_ratio
             - 1e-5
         )
-        fv = 2 * fov * (v + ti.random(ti.f32)) / self.image_res[1] - fov - 1e-5
+        fv = 2 * half_fov * (v + ti.random(ti.f32)) / self.image_res[1] - half_fov - 1e-5
         du = d.cross(self.up[None]).normalized()
         dv = du.cross(d).normalized()
         d = (d + fu * du + fv * dv).normalized()
@@ -269,20 +266,20 @@ class Renderer:
                             dist, _, _, hit_light_, iters, smat = self.next_hit(
                                 pos, light_dir, inf, colors, shadow_ray=True
                             )
-                            if dist > DIS_LIMIT:
+                            if dist == inf:
                                 # far enough to hit directional light
                                 light_brdf = self.bsdf.disney_evaluate(hit_mat, view, normal, light_dir, tang, bitang)
-                                contrib += throughput * light_brdf * self.light_color[None] * np.pi * dot
+                                contrib += firefly_filter(throughput * light_brdf * self.light_color[None] * np.pi * dot)
                     
                     # Apply weight to throughput
-                    throughput *= ti.math.clamp(brdf * saturate(d.dot(normal)) / pdf, 0.0, 999999.0)
+                    throughput *= brdf * saturate(d.dot(normal)) / pdf
                 else:  # hit background or light voxel, terminate tracing
                     hit_background = 1
-                    contrib += throughput * self.background_color[None]
+                    contrib += firefly_filter(throughput * self.background_color[None])
                     sample_complete = True
 
                 # Russian roulette
-                max_c = throughput.max()
+                max_c = clamp(throughput.max(), 0.0, 1.0)
                 if ti.random() > max_c:
                     throughput = [0, 0, 0]
                     sample_complete = True

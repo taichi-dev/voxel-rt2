@@ -1,5 +1,7 @@
+from cmath import isinf
 import math
 import taichi as ti
+from taichi.math import *
 import numpy as np
 from renderer.math_utils import (eps, inf, vec3, sqr, saturate, sample_cosine_weighted_hemisphere)
 from taichi.math import (mix, reflect)
@@ -266,7 +268,7 @@ class DisneyBSDF:
     @ti.func
     def sample_disney(self, mat, v, n, tang, bitang):
         # set lobe probabilities
-        diffuse_w = (1.0 - mat.metallic) * ti.math.clamp(1.4 - mat.specular, 0.4, 0.9)
+        diffuse_w = (1.0 - mat.metallic) * clamp(1.4 - mat.specular, 0.4, 0.9)
         specular_w = 1.0 - diffuse_w
         clearcoat_w = mat.clearcoat*0.7
 
@@ -326,5 +328,10 @@ class DisneyBSDF:
         else:
             brdf += self.disney_clearcoat(mat, n_dot_l, n_dot_v, n_dot_h, l_dot_h)
             pdf *= clearcoat_w
+
+        if isinf(pdf) or isnan(pdf):
+            pdf = 1.0
+
+        pdf = max(pdf, 1e-3)
 
         return sample_dir, brdf, pdf
