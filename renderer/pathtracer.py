@@ -268,7 +268,6 @@ class Renderer:
 
                     # Apply weight to throughput
                     throughput *= brdf * saturate(d.dot(normal)) / pdf
-                    throughput = clamp(throughput, 0.0, 1e5)
                 else:
                     if closest == inf:
                         # Hit background
