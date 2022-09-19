@@ -61,7 +61,7 @@ class Renderer:
 
         self._rendered_image = ti.Texture(ti.f32, 4, self.image_res)
         self.set_up(*up)
-        self.set_fov(np.deg2rad(30.0))
+        self.set_fov(np.deg2rad(50.0))
 
         self.floor_height[None] = 0
         self.floor_color[None] = (1, 1, 1)
@@ -202,37 +202,32 @@ class Renderer:
 
         contrib = ti.Vector([0.0, 0.0, 0.0])
         throughput = ti.Vector([1.0, 1.0, 1.0])
-        c = ti.Vector([1.0, 1.0, 1.0])
 
         depth = 0
         hit_light = 0
         hit_background = 0
 
-        return d, pos, contrib, throughput, c, depth, hit_light, hit_background
+        return d, pos, contrib, throughput, depth, hit_light, hit_background
 
     @ti.kernel
-    def render(self, n_spp: ti.i32, colors: ti.types.texture(3)):
+    def render(self, colors: ti.types.texture(3)):
 
         # Render
         ti.loop_config(block_dim=128)
         for u, v in self.color_buffer:
-            spp_completed = 0
-
             (
                 d,
                 pos,
                 contrib,
                 throughput,
-                albedo,
                 depth,
                 hit_light,
                 hit_background,
             ) = self.generate_new_sample(u, v)
 
             # Tracing begin
-            while spp_completed < n_spp:
-                sample_complete = False
-
+            sample_complete = False
+            while not sample_complete:
                 depth += 1
                 closest, normal, albedo, hit_light, iters, mat_id = self.next_hit(
                     pos, d, inf, colors, shadow_ray=False)
@@ -298,17 +293,6 @@ class Renderer:
                             # Direct hit to background
                             contrib = self.background_color[None]
                     self.color_buffer[u, v] += contrib
-                    spp_completed += 1
-                    (
-                        d,
-                        pos,
-                        contrib,
-                        throughput,
-                        albedo,
-                        depth,
-                        hit_light,
-                        hit_background,
-                    ) = self.generate_new_sample(u, v)
 
     @ti.kernel
     def _render_to_image(self, img : ti.types.rw_texture(num_dimensions=2, num_channels=4, channel_format=ti.f32, lod=0), samples: ti.i32):
@@ -327,9 +311,9 @@ class Renderer:
         self.current_spp = 0
         self.color_buffer.fill(0)
 
-    def accumulate(self, n_spp):
-        self.render(n_spp, self.world.voxel_color_texture)
-        self.current_spp += n_spp
+    def accumulate(self):
+        self.render(self.world.voxel_color_texture)
+        self.current_spp += 1
 
     def fetch_image(self):
         self._render_to_image(self._rendered_image, self.current_spp)

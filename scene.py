@@ -10,7 +10,6 @@ import __main__
 
 VOXEL_DX = 1 / 64
 SCREEN_RES = (1920, 1080)
-TARGET_FPS = 60
 UP_DIR = (0, 1, 0)
 HELP_MSG = """
 ====================================================
@@ -113,7 +112,7 @@ class Camera:
 
 class Scene:
     def __init__(self, voxel_edges=0.06, exposure=3):
-        ti.init(arch=ti.vulkan)
+        ti.init(arch=ti.vulkan, log_level="trace")
         print(HELP_MSG)
         self.window = ti.ui.Window("Taichi Voxel Renderer", SCREEN_RES, vsync=False)
         self.camera = Camera(self.window, up=UP_DIR)
@@ -161,13 +160,12 @@ class Scene:
         self.renderer.prepare_data()
         canvas = self.window.get_canvas()
         gui = self.window.get_gui()
-        spp = 1
         samples = 0
+        samples_per_frame = 1
         last_1k_samples_time = 0.0
         enable_gui = True
         current_fov = self.renderer.fov[None]
         initial_t = time.time()
-        last_t = initial_t
         while self.window.running:
             should_reset_framebuffer = False
 
@@ -180,8 +178,8 @@ class Scene:
             if should_reset_framebuffer:
                 self.renderer.reset_framebuffer()
 
-            self.renderer.accumulate(spp)
-            samples += spp
+            for i in range(samples_per_frame):
+                self.renderer.accumulate()
             img = self.renderer.fetch_image()
             # if self.window.is_pressed("p"):
             #     timestamp = datetime.today().strftime("%Y-%m-%d-%H%M%S")
@@ -196,8 +194,9 @@ class Scene:
             if samples > 1024:
                 last_1k_samples_time = time.time() - initial_t
                 print("1024 samples took", last_1k_samples_time)
-                samples = 0
+                samples -= 1024
                 initial_t = time.time()
+            samples += samples_per_frame
 
             if self.window.is_pressed("g"):
                 enable_gui = not enable_gui
@@ -206,22 +205,9 @@ class Scene:
                 with gui.sub_window("Settings", x=0.05, y=0.05, width=0.25, height=0.2) as g:
                     g.text("Press G to show/hide GUI")
                     g.text(f"Last 1024 samples took {last_1k_samples_time:.3f}s")
-                    g.text(f"Current adaptive SPP: {spp}")
                     new_fow = np.deg2rad(g.slider_float("Verticle FOV", np.rad2deg(current_fov), 1.0, 90.0))
                     if new_fow != current_fov:
                         current_fov = new_fow
                         self.renderer.fov[None] = current_fov
-                    global TARGET_FPS
-                    TARGET_FPS = g.slider_int("Target FPS", TARGET_FPS, 24, 240)
 
             self.window.show()
-
-            t = time.time()
-            elapsed_time = t - last_t
-            if elapsed_time * TARGET_FPS > 1:
-                spp = int(spp / (elapsed_time * TARGET_FPS) - 1)
-                spp = max(spp, 1)
-            else:
-                spp += 1
-            last_t = t
-
