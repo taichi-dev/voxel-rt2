@@ -45,7 +45,7 @@ def sample_cone(cos_theta_max):
 @ti.func
 def sample_cone_oriented(cos_theta_max, n):
     mat_dir = make_tangent_space(n) @ sample_cone(cos_theta_max)
-    return ti.Vector([mat_dir[0, 0], mat_dir[1, 0], mat_dir[2, 0]])
+    return ti.Vector([mat_dir[0], mat_dir[1], mat_dir[2]])
 
 @ti.func
 def interleave_bits_z3(v: ti.u32):

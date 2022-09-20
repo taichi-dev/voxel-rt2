@@ -227,7 +227,7 @@ class DisneyBSDF:
         ax = max(sqr(mat.roughness) / aspect, 1e-3)
         ay = max(sqr(mat.roughness) * aspect, 1e-3)
 
-        m = GGX_VNDF_aniso(mat, v, n, tang, bitang, ax, ay)
+        m = self.GGX_VNDF_aniso(mat, v, n, tang, bitang, ax, ay)
 
         sampled_dir = reflect(-v, m)
 
@@ -398,7 +398,7 @@ class DisneyBSDF:
                                 l_dot_h, n_dot_h, \
                                 h_dot_x, h_dot_y, \
                                 l_dot_x, l_dot_y, \
-                                v_dot_x, v_dot_y, v_dot_h \
+                                v_dot_x, v_dot_y, v_dot_h, \
                                 tang, bitang, n1, n2)
                 bsdf += self.disney_clearcoat(mat, n_dot_l, n_dot_v, n_dot_h, l_dot_h)
             else:
@@ -440,7 +440,7 @@ class DisneyBSDF:
             ax = max(sqr(mat.roughness) / aspect, 1e-3)
             ay = max(sqr(mat.roughness) * aspect, 1e-3)
 
-            m = GGX_VNDF_aniso(mat, v, n, tang, bitang, ax, ay)
+            m = self.GGX_VNDF_aniso(mat, v, n, tang, bitang, ax, ay)
 
             F = self.sclick_fresnel(v.dot(m), n1, n2)
 
@@ -502,7 +502,7 @@ class DisneyBSDF:
                                 l_dot_h, n_dot_h, \
                                 h_dot_x, h_dot_y, \
                                 l_dot_x, l_dot_y, \
-                                v_dot_x, v_dot_y, v_dot_h \
+                                v_dot_x, v_dot_y, v_dot_h, \
                                 tang, bitang, n1, n2)
             pdf *= translucent_w
         else:
