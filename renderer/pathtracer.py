@@ -8,8 +8,9 @@ from renderer.materials import MaterialList
 from renderer.voxel_world import VoxelWorld
 from renderer.raytracer import VoxelOctreeRaytracer
 from renderer.math_utils import *
+from renderer.reservoir import *
 
-MAX_RAY_DEPTH = 6
+MAX_RAY_DEPTH = 4
 use_directional_light = True
 
 RADIANCE_CLAMP = 3200.0
@@ -69,6 +70,14 @@ class Renderer:
 
         self.bsdf = DisneyBSDF()
         self.mats = MaterialList()
+
+
+        # Auxiliaries
+        self.nee_and_emission_buffer = ti.Vector.field(3, dtype=ti.f32, shape=(image_res[0], image_res[1]))
+
+        # Gbuffer
+        self.gbuff_normals = ti.Vector.field(2, dtype=ti.f16, shape=(image_res[0], image_res[1]))
+        self.gbuff_position = ti.Vector.field(3, dtype=ti.f32, shape=(image_res[0], image_res[1])) # TODO: use depth instead and reconstruct pos
 
     def set_directional_light(self, direction, light_cone_angle, light_color):
         self.light_direction[None] = ti.Vector(direction).normalized()
@@ -204,12 +213,19 @@ class Renderer:
         pos = self.camera_pos[None]
 
         contrib = ti.Vector([0.0, 0.0, 0.0])
+        first_bounce_lobe_id = 0
+        first_bounce_brdf = ti.Vector([0.0, 0.0, 0.0])
+        first_bounce_invpdf = 1.0
+        first_vertex_NEE_and_emission = ti.Vector([0.0, 0.0, 0.0])
         throughput = ti.Vector([1.0, 1.0, 1.0])
 
         hit_light = 0
         hit_background = 0
 
-        return d, pos, contrib, throughput, hit_light, hit_background
+        input_sample_reservoir = Reservoir()
+        input_sample_reservoir.init()
+
+        return d, pos, contrib, first_bounce_lobe_id, first_bounce_brdf, first_bounce_invpdf, first_vertex_NEE_and_emission, throughput, hit_light, hit_background, input_sample_reservoir
 
     @ti.kernel
     def render(self, colors: ti.types.texture(3)):
@@ -221,9 +237,14 @@ class Renderer:
                 d,
                 pos,
                 contrib,
+                first_bounce_lobe_id,
+                first_bounce_brdf, # not really used by restir
+                first_bounce_invpdf,
+                first_vertex_NEE_and_emission,
                 throughput,
                 hit_light,
                 hit_background,
+                input_sample_reservoir
             ) = self.generate_new_sample(u, v)
 
             # Tracing begin
@@ -232,6 +253,18 @@ class Renderer:
                     pos, d, inf, colors, shadow_ray=False)
                 hit_mat = self.mats.mat_list[mat_id]
                 hit_pos = pos + closest * d
+
+                # Write to gbuffer and reservoir
+                if(depth == 0):
+                    self.gbuff_normals[u, v]  = encodeUnitVector3x16(normal)
+                    self.gbuff_position[u, v] = hit_pos
+                    input_sample_reservoir.z.x1 = hit_pos
+                    input_sample_reservoir.z.n1 = normal
+                elif(depth == 1):
+                    input_sample_reservoir.z.x2 = hit_pos
+                    input_sample_reservoir.z.n2 = normal
+                elif(depth == 2):
+                    input_sample_reservoir.z.x3 = hit_pos # dont need normal of fourth vertex for reconnection shift
 
                 # Enable this to debug iteration counts
                 if ti.static(False):
@@ -260,32 +293,55 @@ class Renderer:
                             )
                             if dist >= inf:
                                 # far enough to hit directional light
-                                light_brdf = self.bsdf.disney_evaluate(hit_mat, view, normal, light_dir, tang, bitang)
-                                contrib += firefly_filter(throughput * light_brdf * self.light_color[None] * np.pi * dot)
+                                light_bsdf = self.bsdf.disney_evaluate(hit_mat, view, normal, light_dir, tang, bitang)
+                                NEE_contrib = firefly_filter(throughput * light_bsdf * self.light_color[None] * np.pi * dot)
+                                if depth == 0:
+                                    first_vertex_NEE_and_emission += NEE_contrib
+                                else:
+                                    contrib += NEE_contrib
                     
                     # Sample next bounce
-                    d, brdf, pdf = self.bsdf.sample_disney(hit_mat, view, normal, tang, bitang)
+                    d, bsdf, pdf, lobe_id = self.bsdf.sample_disney(hit_mat, view, normal, tang, bitang)
 
-                    # Apply weight to throughput
-                    throughput *= brdf * saturate(d.dot(normal)) / pdf
+                    # Apply weight to throughput (Not on first bounce)
+                    if depth == 0:
+                        first_bounce_invpdf = 1.0/pdf
+                        first_bounce_brdf = bsdf * saturate(d.dot(normal))
+                    else:
+                        throughput *= bsdf * saturate(d.dot(normal)) / pdf
+                    # throughput *= bsdf * saturate(d.dot(normal)) / pdf
+                    
                 else:
                     if closest == inf:
                         # Hit background
-                        contrib += firefly_filter(throughput * self.background_color[None])
+                        sky_emission = firefly_filter(throughput * self.background_color[None])
+                        contrib += sky_emission
+                        if depth == 0:
+                            first_vertex_NEE_and_emission += sky_emission
                     else:
                         # hit light voxel, terminate tracing
-                        contrib += throughput * albedo
+                        if depth == 0:
+                            first_vertex_NEE_and_emission += albedo
+                        else:
+                            contrib += throughput * albedo
                     break
 
-                # Russian roulette
+                # Russian roulette (with ReSTIR PT, we won't do RR on first bounce)
                 max_c = clamp(throughput.max(), 0.0, 1.0)
                 if ti.random() > max_c:
                     break
                 else:
                     throughput /= max_c
 
-            self.color_buffer[u, v] += contrib
+            # Finish populating reservoir fields
+            input_sample_reservoir.z.L = contrib
+            input_sample_reservoir.M = 1.0
+            F = contrib * first_bounce_brdf * first_bounce_invpdf
+            input_sample_reservoir.finalize(F)
 
+            self.color_buffer[u, v] += F + first_vertex_NEE_and_emission
+            self.nee_and_emission_buffer[u, v] += first_vertex_NEE_and_emission
+            # self.color_buffer[u, v] += contrib
 
     @ti.kernel
     def _render_to_image(self, img : ti.types.rw_texture(num_dimensions=2, num_channels=4, channel_format=ti.f32, lod=0), samples: ti.i32):

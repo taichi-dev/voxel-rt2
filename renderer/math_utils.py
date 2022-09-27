@@ -160,3 +160,31 @@ def uchimura(x):
 
     return T * w0 + L * w1 + S * w2
 
+@ti.func
+def Pack2x8(x):
+    floored = ti.floor(255.0 * x + 0.5)
+    return ti.cast(floored.dot(ti.Vector([1.0 / 65535.0, 256.0 / 65535.0])), ti.f16)
+
+@ti.func
+def Unpack2x8(pack):
+    packed = ti.cast(pack, ti.f32) 
+    packed *= 65535.0 / 256.0
+    y_comp = ti.floor(packed)
+    x_comp = packed - y_comp
+    return ti.Vector([256.0 / 255.0, 1.0 / 255.0]) * ti.Vector([x_comp, y_comp])
+
+# octahedral encoding
+@ti.func
+def encodeUnitVector3x16(vec):
+    vec.xy /= abs(vec.x) + abs(vec.y) + abs(vec.z)
+
+    encoded = ((1.0 - abs(vec.yx)) * ti.Vector([1.0 if vec.x >= 0.0 else -1.0, 1.0 if vec.y >= 0.0 else -1.0]) if vec.z <= 0.0 else vec.xy) * 0.5 + 0.5
+    return (encoded)
+
+@ti.func
+def decodeUnitVector3x16(a):
+    encoded = a * 2.0 - 1.0
+    vec = ti.Vector([encoded.x, encoded.y, 1.0 - abs(encoded.x) - abs(encoded.y)])
+    t = max(-vec.z, 0.0)
+    vec.xy += ti.Vector([-t if vec.x >= 0.0 else t, -t if vec.y >= 0.0 else t])
+    return vec.normalized()
