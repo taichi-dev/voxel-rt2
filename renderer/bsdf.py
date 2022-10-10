@@ -197,17 +197,19 @@ class DisneyBSDF:
 
     @ti.func
     def GGX_VNDF_aniso(self, mat, v, n, tang, bitang, ax, ay):
+        # multiply view vector by inverse TBN matrix
+        v_t = ti.math.mat3(tang, n, bitang) @ v
 
         u = ti.Vector([ti.random(), ti.random()])
         # ggx vndf
-        V = vec3([v.x * ax, v.y, v.z * ay]).normalized()
+        V = vec3([v_t.x * ax, v_t.y, v_t.z * ay]).normalized()
 
         t1 = (V.cross(vec3([0.0, 1.0, 0.0])).normalized()) if V.y < 0.9999 else vec3([1.0, 0.0, 0.0])
         t2 = t1.cross(V)
 
         a = 1.0 / (1.0 + V.y)
         r = ti.sqrt(u.x)
-        phi = (u.y / a * np.pi) if u.y < a else (np.pi + (u.y - a) * np.pi / (1.0 - a))
+        phi = (u.y / a) * np.pi if u.y < a else np.pi + (u.y - a) / (1.0 - a) * np.pi
         p1 = r * ti.cos(phi)
         p2 = r * ti.sin(phi) * (1.0 if u.y < a else V.y)
 
@@ -288,6 +290,7 @@ class DisneyBSDF:
 
     @ti.func
     def sample_disney(self, mat, v, n, tang, bitang):
+
         # set lobe probabilities
         diffuse_w = (1.0 - mat.metallic) * clamp(1.4 - mat.specular, 0.4, 0.9)
         specular_w = 1.0 - diffuse_w
@@ -304,16 +307,16 @@ class DisneyBSDF:
         brdf = vec3([0.0, 0.0, 0.0])
         pdf = 1.0
         rand = ti.random()
-        chosenLobe = -1
+        chosen_lobe = -1
         if(rand < diffuse_w):
             sample_dir, pdf = self.sample_diffuse(mat, n)
-            chosenLobe = 0
+            chosen_lobe = 0
         elif(rand < diffuse_w + specular_w):
             sample_dir, pdf = self.sample_specular(mat, v, n, tang, bitang)
-            chosenLobe = 1
+            chosen_lobe = 1
         else:
             sample_dir, pdf = self.sample_clearcoat(mat, v, n, tang, bitang)
-            chosenLobe = 2
+            chosen_lobe = 2
 
         
         # compute brdf inputs
@@ -337,10 +340,10 @@ class DisneyBSDF:
 
         v_dot_h = (v.dot(h))
 
-        if(chosenLobe == 0):
+        if(chosen_lobe == 0):
             brdf += self.disney_diffuse(mat, n_dot_l, n_dot_v, l_dot_h) * (1.0 - mat.metallic)
             pdf *= diffuse_w
-        elif(chosenLobe == 1):
+        elif(chosen_lobe == 1):
             brdf += self.disney_specular(mat, \
                                 n_dot_l, n_dot_v, \
                                 l_dot_h, n_dot_h, \
@@ -351,12 +354,12 @@ class DisneyBSDF:
             pdf *= specular_w
         else:
             brdf += self.disney_clearcoat(mat, n_dot_l, n_dot_v, n_dot_h, l_dot_h)
-            pdf *= clearcoat_w
+        #     pdf *= clearcoat_w
 
         if isinf(pdf) or isnan(pdf):
             pdf = 1.0
 
-        return sample_dir, brdf, pdf, chosenLobe
+        return sample_dir, brdf, pdf, chosen_lobe
 
     @ti.func
     def translucent_specular(self, mat, \
@@ -472,10 +475,10 @@ class DisneyBSDF:
         bsdf = vec3([0.0, 0.0, 0.0])
         pdf = 1.0
         rand = ti.random()
-        chosenLobe = -1
+        chosen_lobe = -1
         if(rand < clearcoat_w):
             sample_dir, pdf = self.sample_clearcoat(mat, v, n, tang, bitang)
-            chosenLobe = 2
+            chosen_lobe = 2
         else:
             aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
 
@@ -504,7 +507,7 @@ class DisneyBSDF:
                 l_dot_h = abs(sampled_dir.dot(m))
 
                 pdf = F * G * l_dot_h * D / n_dot_l
-                chosenLobe = 3
+                chosen_lobe = 3
             else:
                 sampled_dir = refract(-v, m, eta)
 
@@ -512,7 +515,7 @@ class DisneyBSDF:
                 l_dot_h = abs(sampled_dir.dot(m))
 
                 pdf = (1.0 - F) * G * l_dot_h * D / n_dot_l
-                chosenLobe = 4
+                chosen_lobe = 4
         
         # compute brdf inputs
         n_dot_l = n.dot(sample_dir)
@@ -535,10 +538,10 @@ class DisneyBSDF:
 
         v_dot_h = (v.dot(h))
 
-        if(chosenLobe == 2):
+        if(chosen_lobe == 2):
             bsdf += self.disney_clearcoat(mat, n_dot_l, n_dot_v, n_dot_h, l_dot_h)
             pdf *= clearcoat_w
-        elif(chosenLobe == 3):
+        elif(chosen_lobe == 3):
             brdf += self.translucent_specular(mat, \
                                 n_dot_l, n_dot_v, \
                                 l_dot_h, n_dot_h, \

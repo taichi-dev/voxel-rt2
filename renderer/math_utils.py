@@ -4,6 +4,7 @@ import numpy as np
 
 eps = 1e-6
 inf = np.inf
+uvec2 = ti.types.vector(2, ti.u32)
 
 @ti.func
 def saturate(x):
@@ -25,10 +26,15 @@ def sample_cosine_weighted_hemisphere(n):
     return ti.Vector([n.x + b * ti.cos(phi), n.y + b * ti.sin(phi), n.z + a]).normalized()
 
 @ti.func
-def make_tangent_space(n):
+def make_orthonormal_basis(n):
     h = ti.math.vec3(1.0, 0.0, 0.0) if ti.abs(n.y) > 0.9 else ti.math.vec3(0.0, 1.0, 0.0)
     y = n.cross(h).normalized()
     x = n.cross(y)
+    return x, y
+
+@ti.func
+def make_tangent_space(n):
+    x, y = make_orthonormal_basis(n)
     return ti.math.mat3(x, y, n).transpose()
 
 @ti.func
@@ -179,12 +185,26 @@ def encodeUnitVector3x16(vec):
     vec.xy /= abs(vec.x) + abs(vec.y) + abs(vec.z)
 
     encoded = ((1.0 - abs(vec.yx)) * ti.Vector([1.0 if vec.x >= 0.0 else -1.0, 1.0 if vec.y >= 0.0 else -1.0]) if vec.z <= 0.0 else vec.xy) * 0.5 + 0.5
-    return (encoded)
+    return ti.Vector([ti.cast(encoded.x, ti.f16), ti.cast(encoded.y, ti.f16)])
 
 @ti.func
 def decodeUnitVector3x16(a):
-    encoded = a * 2.0 - 1.0
+    encoded = ti.cast(a, ti.f32) * 2.0 - 1.0
     vec = ti.Vector([encoded.x, encoded.y, 1.0 - abs(encoded.x) - abs(encoded.y)])
     t = max(-vec.z, 0.0)
     vec.xy += ti.Vector([-t if vec.x >= 0.0 else t, -t if vec.y >= 0.0 else t])
     return vec.normalized()
+
+@ti.func
+def hash3(x : ti.u32, y : ti.u32, z : ti.u32):
+	x += x >> 11
+	x ^= x << 7
+	x += y
+	x ^= x << 3
+	x += z ^ (x >> 14)
+	x ^= x << 6
+	x += x >> 15
+	x ^= x << 5
+	x += x >> 12
+	x ^= x << 9
+	return x
