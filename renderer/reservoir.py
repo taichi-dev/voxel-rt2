@@ -10,7 +10,7 @@ class StorageSample:
     rc_normal : ti.types.vector(2, ti.f16)
     rc_incident_dir : vec3
     rc_incident_L : vec3
-    cached_jacobian_term : ti.f16
+    cached_jacobian_term : ti.f16 # When I do encoding for reservoirs, put cached_jacobian_term and lobes into one uint32
 
 
 @ti.dataclass
@@ -21,6 +21,8 @@ class Sample:
     rc_incident_dir : vec3
     rc_incident_L : vec3
     cached_jacobian_term : ti.f32
+    lobes : ti.i32
+
 
 @ti.dataclass
 class Reservoir:
@@ -30,7 +32,12 @@ class Reservoir:
 
     @ti.func
     def init(self):
-        self.z = Sample(L=vec3(0,0,0), rc_pos=vec3(0,0,0), rc_normal=vec3(0,0,0), rc_incident_dir=vec3(0,0,0), rc_incident_L=vec3(0,0,0), cached_jacobian_term=1.0)
+        self.z = Sample(L=vec3(0,0,0), \
+                        rc_pos=vec3(0,0,0), \
+                        rc_normal=vec3(0,0,0), \
+                        rc_incident_dir=vec3(0,0,0), \
+                        rc_incident_L=vec3(0,0,0), \
+                        cached_jacobian_term=1.0, lobes = 0)
         self.M = 0.0
         self.weight = 0.0
 

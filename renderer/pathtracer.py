@@ -72,6 +72,19 @@ class Renderer:
         self.bsdf = DisneyBSDF()
         self.mats = MaterialList()
 
+        # Hardcoded spatial reuse offsets (Temporary)
+        self.reuse_offsets = ti.Vector.field(2, dtype=ti.f32, shape=(9))
+        self.reuse_offsets[0] = ti.Vector([-0.490245, -0.860320])
+        self.reuse_offsets[0] = ti.Vector([0.529266, -0.580959])
+        self.reuse_offsets[0] = ti.Vector([0.039021, 0.558722])
+        self.reuse_offsets[0] = ti.Vector([-0.451224, -0.301598])
+        self.reuse_offsets[0] = ti.Vector([0.568287, -0.022237])
+        self.reuse_offsets[0] = ti.Vector([0.078042, -0.882556])
+        self.reuse_offsets[0] = ti.Vector([-0.412203, 0.257125])
+        self.reuse_offsets[0] = ti.Vector([0.607308, 0.536486])
+        self.reuse_offsets[0] = ti.Vector([0.117063, -0.323834])
+        
+
         # Reservoir storage
         # TODO: Make this use the packed reservoirs and encode/decode on read/write
         self.spatial_reservoirs = Reservoir.field(shape=(image_res[0], image_res[1], 2))
@@ -317,6 +330,7 @@ class Renderer:
                     if depth == 0:
                         first_bounce_invpdf = 1.0/pdf
                         first_bounce_brdf = bsdf * saturate(d.dot(normal))
+                        first_bounce_lobe_id = lobe_id
                     else:
                         throughput *= bsdf * saturate(d.dot(normal)) / pdf
                     # throughput *= bsdf * saturate(d.dot(normal)) / pdf
@@ -345,6 +359,7 @@ class Renderer:
 
             # Finish populating reservoir fields
             input_sample_reservoir.z.L = contrib
+            input_sample_reservoir.z.lobes = first_bounce_lobe_id
             input_sample_reservoir.M = 1.0
             input_sample_reservoir.update_cached_jacobian_term(x1)
 
@@ -384,12 +399,16 @@ class Renderer:
         ti.loop_config(block_dim=128)
         for u, v in self.color_buffer:
             
+            start_index = ti.cast(ti.random() * max_taps, ti.u32)
+            offset_mask = ti.cast(max_taps - 1, ti.u32)
+
+            
             # Generate random offset seeds
             seed_x = ti.cast(u, ti.u32) >> 3
             seed_y = ti.cast(v, ti.u32) >> 3
-            seed = hash3(seed_x, seed_y, ti.cast(self.current_frame^3, ti.u32) + pass_id)
+            seed = hash3(seed_x, seed_y, ti.cast(self.current_frame*2, ti.u32) + pass_id)
 
-            angle_shift = ti.random() # ti.cast(((seed & 0x007FFFFF) | 0x3F800000), ti.f32)/4294967295.0 * np.pi
+            angle_shift = ti.cast(((seed & 0x007FFFFF) | 0x3F800000), ti.f32)/4294967295.0 * np.pi
             radius_shift = ti.random()
 
             # Initialize output reservoir
@@ -413,6 +432,8 @@ class Renderer:
             valid_samples = 0
 
             for i in range(max_taps):
+                # neighbor_index = ti.cast(start_index + i, ti.u32) & offset_mask
+                # offset = ti.cast(self.reuse_offsets[neighbor_index] * max_radius, ti.i32)
                 golden_angle = 2.399963229728
                 
                 angle = (i + angle_shift) * golden_angle
@@ -439,18 +460,19 @@ class Renderer:
 
                 if i > 0 and (center_n1.dot(dir_to_rc_vertex) < 1e-5 or \
                               neighbour_reservoir.z.rc_normal.dot(-dir_to_rc_vertex) < 1e-5 or \
-                              dir_to_rc_vertex.dot(dir_to_rc_vertex) < 0.015*0.015*center_dist*center_dist or \
-                              center_n1.dot(neighbour_normal) < 0.5): 
+                              dir_to_rc_vertex.dot(dir_to_rc_vertex) < 0.015*0.015*center_dist*center_dist):
+                              # center_n1.dot(neighbour_normal) < 0.5): 
                     continue
 
                 dir_to_rc_vertex = dir_to_rc_vertex.normalized()
 
 
                 shifted_integrand = neighbour_reservoir.z.L
-                brdf = self.bsdf.disney_evaluate(disney_mat, \
-                                                               view, center_n1, dir_to_rc_vertex, tang, bitang)
-                brdf *= saturate(dir_to_rc_vertex.dot(center_n1))
-                shifted_integrand *= brdf
+                # shifted_integrand *= self.bsdf.disney_evaluate(disney_mat, \
+                #                                                view, center_n1, dir_to_rc_vertex, tang, bitang)
+                shifted_integrand *= self.bsdf.disney_evaluate_lobewise(disney_mat, \
+                                                               view, center_n1, dir_to_rc_vertex, tang, bitang, neighbour_reservoir.z.lobes)
+                shifted_integrand *= saturate(dir_to_rc_vertex.dot(center_n1))
             
 
                 p_hat = vec3(0.33, 0.33, 0.33).dot(shifted_integrand)
