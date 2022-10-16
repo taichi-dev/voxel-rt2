@@ -5,23 +5,25 @@ import numpy as np
 
 @ti.dataclass
 class StorageSample:
-    L : vec3
     rc_pos : vec3
     rc_normal : ti.types.vector(2, ti.f16)
-    rc_incident_dir : vec3
+    rc_incident_dir : ti.types.vector(2, ti.f16)
     rc_incident_L : vec3
+    rc_NEE_dir : ti.types.vector(2, ti.f16)
     cached_jacobian_term : ti.f16 # When I do encoding for reservoirs, put cached_jacobian_term and lobes into one uint32
 
 
 @ti.dataclass
 class Sample:
     L : vec3
-    rc_pos : vec3
-    rc_normal : vec3
-    rc_incident_dir : vec3
+    rc_pos : vec3 # when rc vertex is an escape vertex, this is a direction instead
+    rc_normal : vec3 # when zero, that means rc vertex is an escape vertex
+    rc_incident_dir : vec3 # when zero, that means path terminated here
     rc_incident_L : vec3
+    rc_NEE_dir : vec3 # when zero, that means NEE visibility is zero
+    rc_mat_info : ti.u32
     cached_jacobian_term : ti.f32
-    lobes : ti.i32
+    lobes : ti.i32 # lobe indices bsdf sampling at x1 and x_rc
 
 
 @ti.dataclass
@@ -37,6 +39,8 @@ class Reservoir:
                         rc_normal=vec3(0,0,0), \
                         rc_incident_dir=vec3(0,0,0), \
                         rc_incident_L=vec3(0,0,0), \
+                        rc_NEE_dir=vec3(0,0,0), \
+                        rc_mat_info=0, \
                         cached_jacobian_term=1.0, lobes = 0)
         self.M = 0.0
         self.weight = 0.0
@@ -63,4 +67,7 @@ class Reservoir:
             self.weight = 0.0
         else:
             self.weight = self.weight / p_hat
-        
+# NOTES
+# when doing reconnection shift:
+#   account for ratio of dstPdf / srcPdf for both x_1 and x_rc
+#   when computing shifted integrand, it is brdf/pdf of first bounce times brdf/pdf of rc bounce times rc_L

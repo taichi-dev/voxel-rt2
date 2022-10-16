@@ -93,7 +93,7 @@ class Renderer:
         self.nee_and_emission_buffer = ti.Vector.field(3, dtype=ti.f32, shape=(image_res[0], image_res[1]))
 
         # Gbuffer
-        self.gbuff_mat_id = ti.Vector.field(2, dtype=ti.i32, shape=(image_res[0], image_res[1]))
+        self.gbuff_mat_id = ti.field(dtype=ti.u32, shape=(image_res[0], image_res[1]))
         self.gbuff_normals = ti.Vector.field(2, dtype=ti.f16, shape=(image_res[0], image_res[1]))
         self.gbuff_position = ti.Vector.field(3, dtype=ti.f32, shape=(image_res[0], image_res[1])) # TODO: use depth instead and reconstruct pos
 
@@ -231,11 +231,9 @@ class Renderer:
         pos = self.camera_pos[None]
 
         contrib = ti.Vector([0.0, 0.0, 0.0])
-        first_bounce_lobe_id = 0
-        first_bounce_brdf = ti.Vector([0.0, 0.0, 0.0])
-        first_bounce_invpdf = 1.0
-        first_vertex_NEE_and_emission = ti.Vector([0.0, 0.0, 0.0])
         throughput = ti.Vector([1.0, 1.0, 1.0])
+        rc_incident_L = ti.Vector([0.0, 0.0, 0.0])
+        rc_throughput = ti.Vector([1.0, 1.0, 1.0])
 
         hit_light = 0
         hit_background = 0
@@ -243,7 +241,7 @@ class Renderer:
         input_sample_reservoir = Reservoir()
         input_sample_reservoir.init()
 
-        return d, pos, contrib, first_bounce_lobe_id, first_bounce_brdf, first_bounce_invpdf, first_vertex_NEE_and_emission, throughput, hit_light, hit_background, input_sample_reservoir
+        return d, pos, contrib, throughput, hit_light, hit_background, input_sample_reservoir
 
     @ti.kernel
     def render(self, colors: ti.types.texture(3)):
@@ -255,17 +253,23 @@ class Renderer:
                 d,
                 pos,
                 contrib,
-                first_bounce_lobe_id,
-                first_bounce_brdf, # not really used by restir
-                first_bounce_invpdf,
-                first_vertex_NEE_and_emission,
                 throughput,
                 hit_light,
                 hit_background,
                 input_sample_reservoir
             ) = self.generate_new_sample(u, v)
 
-            x1 = vec3(0.0, 0.0, 0.0)
+            # values to populate gbuffer with
+            primary_normal = ti.cast(ti.Vector([0.0, 0.0]), ti.f16)
+            primary_pos = vec3(0,0,0)
+            primary_mat_info = ti.cast(0, ti.u32)
+
+            # values to extract from PT
+            throughput_after_rc = ti.Vector([1.0, 1.0, 1.0]) 
+            first_bounce_lobe_id = 0
+            first_bounce_brdf = ti.Vector([0.0, 0.0, 0.0]) 
+            first_bounce_invpdf = 1.0
+            first_vertex_NEE_and_emission = ti.Vector([0.0, 0.0, 0.0])
 
             # Tracing begin
             for depth in range(MAX_RAY_DEPTH):
@@ -276,15 +280,16 @@ class Renderer:
 
                 # Write to gbuffer and reservoir
                 if(depth == 0):
-                    self.gbuff_normals[u, v]  = encodeUnitVector3x16(normal)
-                    self.gbuff_position[u, v] = hit_pos
-                    x1 = hit_pos
-                    self.gbuff_mat_id[u, v] = ti.Vector([mat_id, ti.cast(256*256*255*albedo.r + 256*255*albedo.g + 255*albedo.b, ti.i32)])
+                    primary_normal = encodeUnitVector3x16(normal)
+                    primary_pos = hit_pos
+                    primary_mat_info = encode_material(mat_id, albedo)
+                    
                 elif(depth == 1):
                     input_sample_reservoir.z.rc_pos = hit_pos
                     input_sample_reservoir.z.rc_normal = normal
+                    input_sample_reservoir.z.rc_mat_info = encode_material(mat_id, albedo)
                 elif(depth == 2):
-                    input_sample_reservoir.z.rc_incident_dir = hit_pos # dont need normal of fourth vertex for reconnection shift
+                    input_sample_reservoir.z.rc_incident_dir = d
 
                 # Enable this to debug iteration counts
                 if ti.static(False):
@@ -312,12 +317,17 @@ class Renderer:
                             )
                             if dist >= inf:
                                 # far enough to hit directional light
+                                input_sample_reservoir.z.rc_NEE_dir = light_dir
+
                                 light_bsdf = self.bsdf.disney_evaluate(hit_mat, view, normal, light_dir, tang, bitang)
                                 NEE_contrib = firefly_filter(throughput * light_bsdf * self.light_color[None] * np.pi * dot)
                                 if depth == 0:
                                     first_vertex_NEE_and_emission += NEE_contrib
                                 else:
                                     contrib += NEE_contrib
+                                    
+                                if depth >= 2:
+                                    input_sample_reservoir.z.rc_incident_L += throughput_after_rc * NEE_contrib
                     
                     # Sample next bounce
                     d, bsdf, pdf, lobe_id = self.bsdf.sample_disney(hit_mat, view, normal, tang, bitang)
@@ -332,7 +342,10 @@ class Renderer:
                         first_bounce_brdf = bsdf * saturate(d.dot(normal))
                         first_bounce_lobe_id = lobe_id
                     else:
-                        throughput *= bsdf * saturate(d.dot(normal)) / pdf
+                        bounce_weight = bsdf * saturate(d.dot(normal)) / pdf
+                        throughput *= bounce_weight
+                        if depth >= 2:
+                            throughput_after_rc *= bounce_weight
                     # throughput *= bsdf * saturate(d.dot(normal)) / pdf
                     
                 else:
@@ -342,26 +355,40 @@ class Renderer:
                         contrib += sky_emission
                         if depth == 0:
                             first_vertex_NEE_and_emission += sky_emission
+                        elif depth == 1:
+                            input_sample_reservoir.z.rc_pos = d
+                        
+                        if depth >= 2:
+                            input_sample_reservoir.z.rc_incident_L += throughput_after_rc * sky_emission
                     else:
                         # hit light voxel, terminate tracing
                         if depth == 0:
                             first_vertex_NEE_and_emission += albedo
                         else:
                             contrib += throughput * albedo
+
+                        if depth >= 2:
+                            input_sample_reservoir.z.rc_incident_L += throughput_after_rc * albedo
                     break
 
                 # Russian roulette (with ReSTIR PT, we won't do RR on first bounce)
-                max_c = clamp(throughput.max(), 0.0, 1.0)
-                if ti.random() > max_c:
-                    break
-                else:
-                    throughput /= max_c
+                # max_c = clamp(throughput.max(), 0.0, 1.0)
+                # if ti.random() > max_c:
+                #     break
+                # else:
+                #     throughput /= max_c
+
+            
+            # Write to gbuffer
+            self.gbuff_normals[u, v]  = primary_normal
+            self.gbuff_position[u, v] = primary_pos
+            self.gbuff_mat_id[u, v] = primary_mat_info
 
             # Finish populating reservoir fields
             input_sample_reservoir.z.L = contrib
             input_sample_reservoir.z.lobes = first_bounce_lobe_id
             input_sample_reservoir.M = 1.0
-            input_sample_reservoir.update_cached_jacobian_term(x1)
+            input_sample_reservoir.update_cached_jacobian_term(primary_pos)
 
             F = contrib * first_bounce_brdf
             p_hat = vec3(0.33, 0.33, 0.33).dot(F)
@@ -420,10 +447,8 @@ class Renderer:
             center_x1 = self.gbuff_position[u, v]
             center_n1 = decodeUnitVector3x16(self.gbuff_normals[u, v])
 
-            mat_info = self.gbuff_mat_id[u, v]
-            disney_mat = self.mats.mat_list[mat_info.x]
-            disney_mat.base_col = ti.cast(ti.Vector([mat_info.y/(256*256), (mat_info.y/256) % 256, mat_info.y % 256]), ti.f32) / 255.0
-
+            disney_mat = decode_material(self.mats.mat_list, self.gbuff_mat_id[u, v])
+           
             view = (self.camera_pos[None] - center_x1).normalized()
             tang, bitang = make_orthonormal_basis(center_n1)
 
@@ -460,8 +485,8 @@ class Renderer:
 
                 if i > 0 and (center_n1.dot(dir_to_rc_vertex) < 1e-5 or \
                               neighbour_reservoir.z.rc_normal.dot(-dir_to_rc_vertex) < 1e-5 or \
-                              dir_to_rc_vertex.dot(dir_to_rc_vertex) < 0.015*0.015*center_dist*center_dist):
-                              # center_n1.dot(neighbour_normal) < 0.5): 
+                              # dir_to_rc_vertex.dot(dir_to_rc_vertex) < 0.015*0.015*center_dist*center_dist):
+                              center_n1.dot(neighbour_normal) < 0.5): 
                     continue
 
                 dir_to_rc_vertex = dir_to_rc_vertex.normalized()
@@ -483,10 +508,10 @@ class Renderer:
                     jacobian = neighbour_reservoir.z.cached_jacobian_term
                     dir_y1_to_x2 = neighbour_reservoir.z.rc_pos - center_x1
                     jacobian *= abs(dir_y1_to_x2.normalized().dot(neighbour_reservoir.z.rc_normal)) / dir_y1_to_x2.dot(dir_y1_to_x2)
-                    jacobian = clamp(jacobian, 0.0, 8.0)
+                    p_hat *= clamp(jacobian, 0.0, 8.0)
 
 
-                selected = output_reservoir.merge(neighbour_reservoir, neighbour_reservoir.weight * jacobian * p_hat, force_add)
+                selected = output_reservoir.merge(neighbour_reservoir, neighbour_reservoir.weight * p_hat, force_add)
 
                 if(selected):
                     chosen_F = shifted_integrand

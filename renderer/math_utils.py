@@ -208,3 +208,21 @@ def hash3(x : ti.u32, y : ti.u32, z : ti.u32):
 	x += x >> 12
 	x ^= x << 9
 	return x
+
+@ti.func
+def encode_material(mat_id, albedo):
+    shift = ti.cast(ti.Vector([0, 8, 16, 24]), ti.u32)
+    data = ti.cast(ti.Vector([mat_id, albedo.r*255, albedo.g*255, albedo.b*255]), ti.u32)
+    shifted = data << shift
+    return shifted[0] | shifted[1] | shifted[2] | shifted[3]
+
+@ti.func
+def decode_material(mat_list, enc : ti.u32):
+    shift = ti.cast(ti.Vector([0, 8, 16, 24]), ti.u32)
+    unshifted = enc >> shift
+    unshifted = unshifted & 255
+    albedo = unshifted.yzw / 255.0
+    
+    disney_mat = mat_list[unshifted[0]]
+    disney_mat.base_col = albedo
+    return disney_mat
