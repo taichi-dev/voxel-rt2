@@ -4,6 +4,7 @@ import numpy as np
 
 eps = 1e-6
 inf = np.inf
+uvec2 = ti.types.vector(2, ti.u32)
 
 @ti.func
 def saturate(x):
@@ -25,10 +26,15 @@ def sample_cosine_weighted_hemisphere(n):
     return ti.Vector([n.x + b * ti.cos(phi), n.y + b * ti.sin(phi), n.z + a]).normalized()
 
 @ti.func
-def make_tangent_space(n):
+def make_orthonormal_basis(n):
     h = ti.math.vec3(1.0, 0.0, 0.0) if ti.abs(n.y) > 0.9 else ti.math.vec3(0.0, 1.0, 0.0)
     y = n.cross(h).normalized()
     x = n.cross(y)
+    return x, y
+
+@ti.func
+def make_tangent_space(n):
+    x, y = make_orthonormal_basis(n)
     return ti.math.mat3(x, y, n).transpose()
 
 @ti.func
@@ -160,3 +166,63 @@ def uchimura(x):
 
     return T * w0 + L * w1 + S * w2
 
+@ti.func
+def Pack2x8(x):
+    floored = ti.floor(255.0 * x + 0.5)
+    return ti.cast(floored.dot(ti.Vector([1.0 / 65535.0, 256.0 / 65535.0])), ti.f16)
+
+@ti.func
+def Unpack2x8(pack):
+    packed = ti.cast(pack, ti.f32) 
+    packed *= 65535.0 / 256.0
+    y_comp = ti.floor(packed)
+    x_comp = packed - y_comp
+    return ti.Vector([256.0 / 255.0, 1.0 / 255.0]) * ti.Vector([x_comp, y_comp])
+
+# octahedral encoding
+@ti.func
+def encodeUnitVector3x16(vec):
+    vec.xy /= abs(vec.x) + abs(vec.y) + abs(vec.z)
+
+    encoded = ((1.0 - abs(vec.yx)) * ti.Vector([1.0 if vec.x >= 0.0 else -1.0, 1.0 if vec.y >= 0.0 else -1.0]) if vec.z <= 0.0 else vec.xy) * 0.5 + 0.5
+    return ti.Vector([ti.cast(encoded.x, ti.f16), ti.cast(encoded.y, ti.f16)])
+
+@ti.func
+def decodeUnitVector3x16(a):
+    encoded = ti.cast(a, ti.f32) * 2.0 - 1.0
+    vec = ti.Vector([encoded.x, encoded.y, 1.0 - abs(encoded.x) - abs(encoded.y)])
+    t = max(-vec.z, 0.0)
+    vec.xy += ti.Vector([-t if vec.x >= 0.0 else t, -t if vec.y >= 0.0 else t])
+    return vec.normalized()
+
+@ti.func
+def hash3(x : ti.u32, y : ti.u32, z : ti.u32):
+	x += x >> 11
+	x ^= x << 7
+	x += y
+	x ^= x << 3
+	x += z ^ (x >> 14)
+	x ^= x << 6
+	x += x >> 15
+	x ^= x << 5
+	x += x >> 12
+	x ^= x << 9
+	return x
+
+@ti.func
+def encode_material(mat_id, albedo):
+    shift = ti.cast(ti.Vector([0, 8, 16, 24]), ti.u32)
+    data = ti.cast(ti.Vector([mat_id, albedo.r*255, albedo.g*255, albedo.b*255]), ti.u32)
+    shifted = data << shift
+    return shifted[0] | shifted[1] | shifted[2] | shifted[3]
+
+@ti.func
+def decode_material(mat_list, enc : ti.u32):
+    shift = ti.cast(ti.Vector([0, 8, 16, 24]), ti.u32)
+    unshifted = enc >> shift
+    unshifted = unshifted & 255
+    albedo = unshifted.yzw / 255.0
+    
+    disney_mat = mat_list[unshifted[0]]
+    disney_mat.base_col = albedo
+    return disney_mat

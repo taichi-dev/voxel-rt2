@@ -15,7 +15,7 @@ def create_block(pos, size, color, color_noise):
     for I in ti.grouped(
             ti.ndrange((pos[0], pos[0] + size[0]), (pos[1], pos[1] + size[1]),
                        (pos[2], pos[2] + size[2]))):
-        scene.set_voxel(I, 1, color + color_noise * ti.random())
+        scene.set_voxel(I, 11, color + color_noise * ti.random())
 
 
 @ti.func
@@ -50,7 +50,7 @@ def create_tree(pos, height, radius, color):
         prob = max((radius - vec2(i, j).norm()) / radius, 0)
         prob = prob * prob
         if ti.random() < prob * prob:
-            scene.set_voxel(pos + ivec3(i, 1, j), 1,
+            scene.set_voxel(pos + ivec3(i, 1, j), 11,
                             color + ti.random() * vec3(0.1))
 
 
