@@ -10,6 +10,7 @@ class StorageSample:
     rc_incident_dir : ti.types.vector(2, ti.f16)
     rc_incident_L : vec3
     rc_NEE_dir : ti.types.vector(2, ti.f16)
+    rc_mat_info : ti.u32
     cached_jacobian_term : ti.f16 # When I do encoding for reservoirs, put cached_jacobian_term and lobes into one uint32
 
 

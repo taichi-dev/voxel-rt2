@@ -10,6 +10,8 @@ from renderer.raytracer import VoxelOctreeRaytracer
 from renderer.math_utils import *
 from renderer.reservoir import *
 
+USE_RESTIR_PT = False
+
 MAX_RAY_DEPTH = 4
 use_directional_light = True
 
@@ -270,6 +272,7 @@ class Renderer:
             first_bounce_brdf = ti.Vector([0.0, 0.0, 0.0]) 
             first_bounce_invpdf = 1.0
             first_vertex_NEE_and_emission = ti.Vector([0.0, 0.0, 0.0])
+            rc_bounce_lobe_id = 0
 
             # Tracing begin
             for depth in range(MAX_RAY_DEPTH):
@@ -344,6 +347,8 @@ class Renderer:
                     else:
                         bounce_weight = bsdf * saturate(d.dot(normal)) / pdf
                         throughput *= bounce_weight
+                        if depth == 1:
+                            rc_bounce_lobe_id = lobe_id
                         if depth >= 2:
                             throughput_after_rc *= bounce_weight
                     # throughput *= bsdf * saturate(d.dot(normal)) / pdf
@@ -371,6 +376,7 @@ class Renderer:
                             input_sample_reservoir.z.rc_incident_L += throughput_after_rc * albedo
                     break
 
+                # RR is disabled for now since it complicates ReSTIR PT a litte bit
                 # Russian roulette (with ReSTIR PT, we won't do RR on first bounce)
                 # max_c = clamp(throughput.max(), 0.0, 1.0)
                 # if ti.random() > max_c:
@@ -386,7 +392,7 @@ class Renderer:
 
             # Finish populating reservoir fields
             input_sample_reservoir.z.L = contrib
-            input_sample_reservoir.z.lobes = first_bounce_lobe_id
+            input_sample_reservoir.z.lobes = rc_bounce_lobe_id*10 + first_bounce_lobe_id
             input_sample_reservoir.M = 1.0
             input_sample_reservoir.update_cached_jacobian_term(primary_pos)
 
@@ -398,7 +404,8 @@ class Renderer:
                                                # sample's unbiased contribution weight 
             self.spatial_reservoirs[u, v, 0] = input_sample_reservoir
 
-            # self.color_buffer[u, v] += F * input_sample_reservoir.weight + first_vertex_NEE_and_emission
+            if ti.static(not USE_RESTIR_PT):
+                self.color_buffer[u, v] += F * input_sample_reservoir.weight + first_vertex_NEE_and_emission
             self.nee_and_emission_buffer[u, v] = first_vertex_NEE_and_emission
             # self.color_buffer[u, v] += contrib
 
@@ -479,6 +486,8 @@ class Renderer:
                 dir_to_rc_vertex = (neighbour_reservoir.z.rc_pos - center_x1)
                 neighbour_dist = distance(self.camera_pos[None], neighbour_position)
 
+                neighbour_primary_lobe_id = neighbour_reservoir.z.lobes % 10
+
                 # dir_to_rc_vertex.dot(dir_to_rc_vertex) < 0.015*0.015*center_dist*center_dist 
                 if i > 0 and (abs(neighbour_dist - center_dist) > 0.1*center_dist):
                     continue
@@ -496,7 +505,7 @@ class Renderer:
                 # shifted_integrand *= self.bsdf.disney_evaluate(disney_mat, \
                 #                                                view, center_n1, dir_to_rc_vertex, tang, bitang)
                 shifted_integrand *= self.bsdf.disney_evaluate_lobewise(disney_mat, \
-                                                               view, center_n1, dir_to_rc_vertex, tang, bitang, neighbour_reservoir.z.lobes)
+                                                               view, center_n1, dir_to_rc_vertex, tang, bitang, neighbour_primary_lobe_id)
                 shifted_integrand *= saturate(dir_to_rc_vertex.dot(center_n1))
             
 
@@ -533,8 +542,9 @@ class Renderer:
     
     def accumulate(self):
         self.render(self.world.voxel_color_texture)
-        self.spatial_GRIS(0, 16.0, 6, 2)
-        self.spatial_GRIS(1, 16.0, 6, 2)
+        if ti.static(USE_RESTIR_PT):
+            self.spatial_GRIS(0, 16.0, 6, 2)
+            self.spatial_GRIS(1, 16.0, 6, 2)
         self.current_spp += 1
         self.current_frame += 1
 
