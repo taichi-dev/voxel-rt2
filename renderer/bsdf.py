@@ -164,11 +164,26 @@ class DisneyBSDF:
         return bsdf
 
     @ti.func
+    def pdf_diffuse(self, mat, n, l):
+        pdf = saturate(l.dot(n)) / np.pi
+        return pdf
+
+    @ti.func
     def sample_diffuse(self, mat, n):
         cosine_weighted_dir = sample_cosine_weighted_hemisphere(n)
         pdf = saturate(cosine_weighted_dir.dot(n)) / np.pi
 
         return cosine_weighted_dir, pdf
+    
+    @ti.func
+    def pdf_clearcoat(self, mat, v, n, l, tang, bitang):
+        alpha = mix(0.1, 0.001, mat.clearcoat_gloss)
+        h = (v + l).normalized()
+        n_dot_h = abs(n.dot(h))
+        v_dot_h = v.dot(h)
+        D = self.GTR1(n_dot_h, alpha)
+        pdf = D * n_dot_h / (4.0 * v_dot_h)
+        return pdf
 
     @ti.func
     def sample_clearcoat(self, mat, v, n, tang, bitang):
@@ -224,6 +239,31 @@ class DisneyBSDF:
         return m
 
     @ti.func
+    def pdf_specular(self, mat, v, n, l, tang, bitang):
+
+        aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
+
+        ax = max(sqr(mat.roughness) / aspect, 1e-3)
+        ay = max(sqr(mat.roughness) * aspect, 1e-3)
+
+        h = (v + l).normalized()
+
+        # compute pdf
+        n_dot_l = abs(n.dot(l))
+        n_dot_v = (n.dot(v))
+        l_dot_h = abs(l.dot(h))
+        n_dot_h = (n.dot(h))
+        h_dot_x = (h.dot(tang))
+        h_dot_y = (h.dot(bitang))
+        v_dot_x = (v.dot(tang))
+        v_dot_y = (v.dot(bitang))
+        D = self.GTR2_anisotropic(n_dot_h, h_dot_x, h_dot_y, ax, ay)
+        G = self.smithG_GGX_aniso(n_dot_v, v_dot_x, v_dot_y, ax, ay)
+        pdf = G * l_dot_h * D / n_dot_l
+
+        return pdf
+
+    @ti.func
     def sample_specular(self, mat, v, n, tang, bitang):
 
         aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
@@ -251,7 +291,7 @@ class DisneyBSDF:
         return sampled_dir, pdf
 
     @ti.func
-    def disney_evaluate_lobewise(self, mat, v, n, l, tang, bitang, lobe_id):
+    def disney_evaluate_lobewise(self, mat, v, n, l, tang, bitang, lobe_id, specular_mult = 1.0):
         n_dot_l = n.dot(l)
         n_dot_v = (n.dot(v))
 
@@ -283,16 +323,14 @@ class DisneyBSDF:
                                 h_dot_x, h_dot_y, \
                                 l_dot_x, l_dot_y, \
                                 v_dot_x, v_dot_y, \
-                                tang, bitang)
+                                tang, bitang)*specular_mult
             elif lobe_id == 2:
-                bsdf += self.disney_clearcoat(mat, n_dot_l, n_dot_v, n_dot_h, l_dot_h)
+                bsdf += self.disney_clearcoat(mat, n_dot_l, n_dot_v, n_dot_h, l_dot_h)*specular_mult
         return bsdf
 
     @ti.func
-    def sample_disney(self, mat, v, n, tang, bitang):
-
-        # set lobe probabilities
-        diffuse_w = (1.0 - mat.metallic) * clamp(1.4 - mat.specular, 0.4, 0.9)
+    def disney_get_lobe_probabilities(self, mat):
+        diffuse_w = (1.0 - mat.metallic) * clamp(1.0 - mat.specular, 0.4, 0.9)
         specular_w = 1.0 - diffuse_w
         clearcoat_w = mat.clearcoat*0.7
 
@@ -301,6 +339,32 @@ class DisneyBSDF:
         diffuse_w /= w_sum
         specular_w /= w_sum
         clearcoat_w /= w_sum
+
+        return diffuse_w, specular_w, clearcoat_w
+
+    @ti.func
+    def pdf_disney(self, mat, v, n, l, tang, bitang, lobe_id):
+
+        diffuse_w, specular_w, clearcoat_w = self.disney_get_lobe_probabilities(mat)
+
+        pdf = 1.0
+        if(lobe_id == 0):
+            pdf *= self.pdf_diffuse(mat, n, l) * diffuse_w
+        elif(lobe_id == 1):
+            pdf *= self.pdf_specular(mat, v, n, l, tang, bitang) * specular_w
+        else:
+            pdf *= self.pdf_clearcoat(mat, v, n, l, tang, bitang) * clearcoat_w
+
+        if isinf(pdf) or isnan(pdf):
+            pdf = 1.0
+            
+        return pdf
+
+    @ti.func
+    def sample_disney(self, mat, v, n, tang, bitang):
+
+        # set lobe probabilities
+        diffuse_w, specular_w, clearcoat_w = self.disney_get_lobe_probabilities(mat)
 
         # choose a lobe
         sample_dir = vec3([1.0, 1.0, 1.0])
@@ -354,7 +418,7 @@ class DisneyBSDF:
             pdf *= specular_w
         else:
             brdf += self.disney_clearcoat(mat, n_dot_l, n_dot_v, n_dot_h, l_dot_h)
-        #     pdf *= clearcoat_w
+            pdf *= clearcoat_w
 
         if isinf(pdf) or isnan(pdf):
             pdf = 1.0
