@@ -10,7 +10,7 @@ from renderer.raytracer import VoxelOctreeRaytracer
 from renderer.math_utils import *
 from renderer.reservoir import *
 
-USE_RESTIR_PT = False
+USE_RESTIR_PT = True
 
 MAX_RAY_DEPTH = 4
 use_directional_light = True
@@ -38,6 +38,7 @@ class Renderer:
         self.light_direction = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.light_cone_cos_theta_max = ti.field(dtype=ti.f32, shape=())
         self.light_color = ti.Vector.field(3, dtype=ti.f32, shape=())
+        self.light_multiplier = 3.0
 
         self.cast_voxel_hit = ti.field(ti.i32, shape=())
         self.cast_voxel_index = ti.Vector.field(3, ti.i32, shape=())
@@ -274,6 +275,8 @@ class Renderer:
             first_vertex_NEE_and_emission = ti.Vector([0.0, 0.0, 0.0])
             rc_bounce_lobe_id = 0
 
+            is_sky_ray = False
+
             # Tracing begin
             for depth in range(MAX_RAY_DEPTH):
                 closest, normal, albedo, hit_light, iters, mat_id = self.next_hit(
@@ -323,11 +326,11 @@ class Renderer:
                                 input_sample_reservoir.z.rc_NEE_dir = light_dir
 
                                 light_bsdf = self.bsdf.disney_evaluate(hit_mat, view, normal, light_dir, tang, bitang)
-                                NEE_contrib = firefly_filter(throughput * light_bsdf * self.light_color[None] * np.pi * dot)
+                                NEE_contrib = firefly_filter(light_bsdf * self.light_color[None] * self.light_multiplier * dot)
                                 if depth == 0:
-                                    first_vertex_NEE_and_emission += NEE_contrib
+                                    first_vertex_NEE_and_emission += throughput * NEE_contrib
                                 else:
-                                    contrib += NEE_contrib
+                                    contrib += throughput * NEE_contrib
                                     
                                 if depth >= 2:
                                     input_sample_reservoir.z.rc_incident_L += throughput_after_rc * NEE_contrib
@@ -340,28 +343,30 @@ class Renderer:
                     # lobe_id = 0
 
                     # Apply weight to throughput (Not on first bounce)
+                    bounce_weight = bsdf * saturate(d.dot(normal))
                     if depth == 0:
                         first_bounce_invpdf = 1.0/pdf
-                        first_bounce_brdf = bsdf * saturate(d.dot(normal))
                         first_bounce_lobe_id = lobe_id
                     else:
-                        bounce_weight = bsdf * saturate(d.dot(normal)) / pdf
-                        throughput *= bounce_weight
+                        bounce_weight /= pdf
                         if depth == 1:
                             rc_bounce_lobe_id = lobe_id
                         if depth >= 2:
                             throughput_after_rc *= bounce_weight
-                    # throughput *= bsdf * saturate(d.dot(normal)) / pdf
+                    throughput *= bounce_weight
                     
                 else:
                     if closest == inf:
                         # Hit background
-                        sky_emission = firefly_filter(throughput * self.background_color[None])
-                        contrib += sky_emission
+                        sky_emission = firefly_filter(self.background_color[None])
+                        contrib += throughput * sky_emission
                         if depth == 0:
-                            first_vertex_NEE_and_emission += sky_emission
+                            # first_vertex_NEE_and_emission += throughput * sky_emission
+                            primary_pos = vec3(0.0, 0.0, 0.0)
+                            is_sky_ray = True
                         elif depth == 1:
                             input_sample_reservoir.z.rc_pos = d
+                            input_sample_reservoir.z.rc_incident_L = sky_emission
                         
                         if depth >= 2:
                             input_sample_reservoir.z.rc_incident_L += throughput_after_rc * sky_emission
@@ -391,21 +396,25 @@ class Renderer:
             self.gbuff_mat_id[u, v] = primary_mat_info
 
             # Finish populating reservoir fields
-            input_sample_reservoir.z.L = contrib
+            input_sample_reservoir.z.F = contrib
             input_sample_reservoir.z.lobes = rc_bounce_lobe_id*10 + first_bounce_lobe_id
             input_sample_reservoir.M = 1.0
             input_sample_reservoir.update_cached_jacobian_term(primary_pos)
 
-            F = contrib * first_bounce_brdf
-            p_hat = vec3(0.33, 0.33, 0.33).dot(F)
+
+            p_hat = luminance(contrib)
             input_sample_reservoir.weight = p_hat * first_bounce_invpdf # MIS weight here is just 1.0
 
-            input_sample_reservoir.finalize(F) # set reservoir w to now hold the initial 
-                                               # sample's unbiased contribution weight 
+            input_sample_reservoir.finalize() # set reservoir W to now hold the initial 
+                                              # sample's unbiased contribution weight 
+            
+            if is_sky_ray:
+                input_sample_reservoir.weight = 1.0
+
             self.spatial_reservoirs[u, v, 0] = input_sample_reservoir
 
             if ti.static(not USE_RESTIR_PT):
-                self.color_buffer[u, v] += F * input_sample_reservoir.weight + first_vertex_NEE_and_emission
+                self.color_buffer[u, v] += input_sample_reservoir.z.F * input_sample_reservoir.weight + first_vertex_NEE_and_emission
             self.nee_and_emission_buffer[u, v] = first_vertex_NEE_and_emission
             # self.color_buffer[u, v] += contrib
 
@@ -426,8 +435,122 @@ class Renderer:
         self.current_spp = 0
         self.color_buffer.fill(0)
 
+    # returns 1: computed integrand after it is shifted from src_reservoir into this reservoir's domain
+    # returns 2: Jacobian determinant of this transformation
+    @ti.func
+    def shift(self, dst_pos, dst_normal, dst_material, \
+                    src_pos, src_normal, src_material, \
+                    dst_reservoir, src_reservoir):
+        # RC vertex info
+        rc_is_escape_vertex = is_vec_zero(src_reservoir.z.rc_normal)
+        rc_is_last_vertex = is_vec_zero(src_reservoir.z.rc_incident_dir)
+        rc_is_NEE_visible = not is_vec_zero(src_reservoir.z.rc_NEE_dir)
+
+        dir_to_rc_vertex = src_reservoir.z.rc_pos if rc_is_escape_vertex else (src_reservoir.z.rc_pos - dst_pos).normalized()
+        src_dir_to_rc_vertex = src_reservoir.z.rc_pos if rc_is_escape_vertex else (src_reservoir.z.rc_pos - src_pos).normalized()
+
+        # NdotL at primary and rc vertices
+        passed_checks = 1.0
+        if dst_normal.dot(dir_to_rc_vertex) < 1e-5 or \
+           (not rc_is_escape_vertex and src_reservoir.z.rc_normal.dot(-dir_to_rc_vertex) < 1e-5):
+           passed_checks = 0.0
+
+        rc_tang, rc_bitang = make_orthonormal_basis(src_reservoir.z.rc_normal)
+        rc_mat, rc_mat_id = decode_material(self.mats.mat_list, src_reservoir.z.rc_mat_info)
+
+        # Rc vertex weights
+        rc_brdf = vec3(0., 0., 0.)
+        dst_rc_pdf = 1.0
+        src_rc_pdf = 1.0
+        if not rc_is_last_vertex and not rc_is_escape_vertex:
+            rc_brdf = self.bsdf.disney_evaluate_lobewise(rc_mat, \
+                                                        -dir_to_rc_vertex, \
+                                                         src_reservoir.z.rc_normal, \
+                                                         src_reservoir.z.rc_incident_dir, \
+                                                         rc_tang, rc_bitang, \
+                                                         src_reservoir.z.lobes // 10)
+            rc_brdf *= saturate(src_reservoir.z.rc_normal.dot(src_reservoir.z.rc_incident_dir))
+            dst_rc_pdf = self.bsdf.pdf_disney(rc_mat, \
+                                             -dir_to_rc_vertex, \
+                                              src_reservoir.z.rc_normal, \
+                                              src_reservoir.z.rc_incident_dir, \
+                                              rc_tang, rc_bitang, \
+                                              src_reservoir.z.lobes // 10)
+            
+            src_rc_pdf = self.bsdf.pdf_disney(rc_mat, \
+                                             -src_dir_to_rc_vertex, \
+                                              src_reservoir.z.rc_normal, \
+                                              src_reservoir.z.rc_incident_dir, \
+                                              rc_tang, rc_bitang, \
+                                              src_reservoir.z.lobes // 10)
+
+        rc_nee_brdf = vec3(0., 0., 0.)
+        if rc_is_NEE_visible:
+            rc_nee_brdf = self.bsdf.disney_evaluate_lobewise(rc_mat, \
+                                                            -dir_to_rc_vertex, \
+                                                             src_reservoir.z.rc_normal, \
+                                                             src_reservoir.z.rc_NEE_dir, \
+                                                             rc_tang, rc_bitang, \
+                                                             src_reservoir.z.lobes // 10)
+            rc_nee_brdf *= saturate(src_reservoir.z.rc_normal.dot(src_reservoir.z.rc_NEE_dir))
+
+        # primary dst vertex weights
+        dst_tang, dst_bitang = make_orthonormal_basis(dst_normal)
+        view = (self.camera_pos[None] - dst_pos).normalized()
+        primary_brdf = self.bsdf.disney_evaluate_lobewise(dst_material, \
+                                                          view, \
+                                                          dst_normal, \
+                                                          dir_to_rc_vertex, \
+                                                          dst_tang, dst_bitang, \
+                                                          src_reservoir.z.lobes % 10) # Evaluating the source reservoir's
+                                                                                      # BSDF lobe for primary vertex gives correct 
+                                                                                      # results. While using the destination's lobe
+                                                                                      # gives incorrect/noisy/bad results.
+                                                                                      # TODO: Understand why...
+        primary_brdf *= saturate(dst_normal.dot(dir_to_rc_vertex))
+        dst_primary_pdf = self.bsdf.pdf_disney(dst_material, \
+                                               view, \
+                                               dst_normal, \
+                                               dir_to_rc_vertex, \
+                                               dst_tang, dst_bitang, \
+                                               dst_reservoir.z.lobes % 10)
+        
+        # primary src vertex weights
+        src_tang, src_bitang = make_orthonormal_basis(src_normal)
+        src_primary_pdf = self.bsdf.pdf_disney(src_material, \
+                                               (self.camera_pos[None] - src_pos).normalized(), \
+                                               src_normal, \
+                                               src_dir_to_rc_vertex, \
+                                               src_tang, src_bitang, \
+                                               src_reservoir.z.lobes % 10)
+        # compute shifted integrand
+        contrib = vec3(0., 0., 0.)
+        if not rc_is_escape_vertex and not rc_is_last_vertex:
+            contrib += rc_brdf / dst_rc_pdf * src_reservoir.z.rc_incident_L # rc bounce
+        if rc_is_escape_vertex:
+            contrib += src_reservoir.z.rc_incident_L # sky emission
+        contrib += rc_nee_brdf * self.light_color[None] * self.light_multiplier # NEE at rc vertex
+        contrib += vec3(0., 0., 0.) if rc_mat_id != 2 else rc_mat.base_col # emission at rc vertex
+
+        contrib *= primary_brdf
+
+        # compute jacobian
+        jacobian = 1.0 # limit case of escape vertices converges to one
+
+        # jacobian *= dst_rc_pdf / src_rc_pdf
+        # jacobian *= dst_primary_pdf / src_primary_pdf
+
+        if not rc_is_escape_vertex:
+            jacobian = src_reservoir.z.cached_jacobian_term
+            dir_y1_to_x2 = src_reservoir.z.rc_pos - dst_pos
+            jacobian *= abs(dir_y1_to_x2.normalized().dot(src_reservoir.z.rc_normal)) / dir_y1_to_x2.dot(dir_y1_to_x2)
+            jacobian = clamp(jacobian, 0.0, 8.0)
+        
+        return contrib, jacobian*passed_checks
+
+
     @ti.kernel
-    def spatial_GRIS(self, pass_id : ti.u32, max_radius : ti.f32, max_taps : ti.i32, pass_total : ti.i32):
+    def spatial_GRIS(self, pass_id : ti.i32, max_radius : ti.f32, max_taps : ti.i32, pass_total : ti.i32):
 
         # Render
         ti.loop_config(block_dim=128)
@@ -438,23 +561,30 @@ class Renderer:
 
             
             # Generate random offset seeds
-            seed_x = ti.cast(u, ti.u32) >> 3
-            seed_y = ti.cast(v, ti.u32) >> 3
+            seed_x = ti.cast(u, ti.u32) >> 3 if pass_id == 0 else 2
+            seed_y = ti.cast(v, ti.u32) >> 3 if pass_id == 0 else 2
             seed = hash3(seed_x, seed_y, ti.cast(self.current_frame*2, ti.u32) + pass_id)
 
             angle_shift = ti.cast(((seed & 0x007FFFFF) | 0x3F800000), ti.f32)/4294967295.0 * np.pi
             radius_shift = ti.random()
+
+            # Get center reservoir
+            center_reservoir = self.spatial_reservoirs[u, v, pass_id % 2]
 
             # Initialize output reservoir
             output_reservoir = Reservoir()
             output_reservoir.init()
 
             # Variables of center pixel
-            chosen_F = vec3(0.0, 0.0, 0.0)
             center_x1 = self.gbuff_position[u, v]
             center_n1 = decodeUnitVector3x16(self.gbuff_normals[u, v])
 
-            disney_mat = decode_material(self.mats.mat_list, self.gbuff_mat_id[u, v])
+            if is_vec_zero(center_x1):
+                self.color_buffer[u, v] += center_reservoir.z.F
+                continue
+
+            center_mat, center_mat_id = decode_material(self.mats.mat_list, self.gbuff_mat_id[u, v])
+
            
             view = (self.camera_pos[None] - center_x1).normalized()
             tang, bitang = make_orthonormal_basis(center_n1)
@@ -471,67 +601,53 @@ class Renderer:
                 angle = (i + angle_shift) * golden_angle
                 offset_radius = ti.sqrt(float(i + radius_shift) / ti.cast(max_taps, ti.f32)) * max_radius
 
-                offset = ti.Vector([ti.cast(ti.cos(angle) * offset_radius, ti.i32), ti.cast(ti.sin(angle) * offset_radius, ti.i32)])
-                force_add = False
-                if i == 0:
-                    offset = ti.Vector([0, 0])
-                    force_add = True
+                offset = ti.cast(ti.Vector([ti.cos(angle) * offset_radius, ti.sin(angle) * offset_radius]), ti.i32)
+                # force_add = False
+                # if i == 0:
+                #     offset = ti.Vector([0, 0])
+                #     force_add = True
+                if offset.x == 0 and offset.y == 0:
+                    continue
                 
                 tap_coord = ti.Vector([u, v]) + offset
 
-                neighbour_normal = decodeUnitVector3x16(self.gbuff_normals[tap_coord.x, tap_coord.y])
-                neighbour_position = self.gbuff_position[tap_coord.x, tap_coord.y]
+                neighbour_n1 = decodeUnitVector3x16(self.gbuff_normals[tap_coord.x, tap_coord.y])
+                neighbour_x1 = self.gbuff_position[tap_coord.x, tap_coord.y]
                 neighbour_reservoir = self.spatial_reservoirs[tap_coord.x, tap_coord.y, pass_id % 2]
 
-                dir_to_rc_vertex = (neighbour_reservoir.z.rc_pos - center_x1)
-                neighbour_dist = distance(self.camera_pos[None], neighbour_position)
+                neighbour_dist = distance(self.camera_pos[None], neighbour_x1)
 
                 neighbour_primary_lobe_id = neighbour_reservoir.z.lobes % 10
 
-                # dir_to_rc_vertex.dot(dir_to_rc_vertex) < 0.015*0.015*center_dist*center_dist 
-                if i > 0 and (abs(neighbour_dist - center_dist) > 0.1*center_dist):
+                if abs(neighbour_dist - center_dist) > 0.1*center_dist or center_n1.dot(neighbour_n1) < 0.5:
                     continue
 
-                if i > 0 and (center_n1.dot(dir_to_rc_vertex) < 1e-5 or \
-                              neighbour_reservoir.z.rc_normal.dot(-dir_to_rc_vertex) < 1e-5 or \
-                              # dir_to_rc_vertex.dot(dir_to_rc_vertex) < 0.015*0.015*center_dist*center_dist):
-                              center_n1.dot(neighbour_normal) < 0.5): 
+                neighbour_mat, neighbour_mat_id = decode_material(self.mats.mat_list, self.gbuff_mat_id[tap_coord.x, tap_coord.y])
+
+                shifted_integrand, jacobian = self.shift(center_x1   , center_n1   , center_mat, \
+                                                    neighbour_x1, neighbour_n1, neighbour_mat, \
+                                                    output_reservoir, neighbour_reservoir)
+                
+                p_hat = luminance(shifted_integrand) * jacobian
+
+                if jacobian < 1e-3: 
                     continue
 
-                dir_to_rc_vertex = dir_to_rc_vertex.normalized()
+                neighbour_reservoir.z.F = shifted_integrand
+                neighbour_reservoir.z.lobes = neighbour_reservoir.z.lobes // 10 + center_reservoir.z.lobes % 10
 
-
-                shifted_integrand = neighbour_reservoir.z.L
-                # shifted_integrand *= self.bsdf.disney_evaluate(disney_mat, \
-                #                                                view, center_n1, dir_to_rc_vertex, tang, bitang)
-                shifted_integrand *= self.bsdf.disney_evaluate_lobewise(disney_mat, \
-                                                               view, center_n1, dir_to_rc_vertex, tang, bitang, neighbour_primary_lobe_id)
-                shifted_integrand *= saturate(dir_to_rc_vertex.dot(center_n1))
-            
-
-                p_hat = vec3(0.33, 0.33, 0.33).dot(shifted_integrand)
-
-                jacobian = 1.0 # TODO: actually do jacobian
-
-                if i > 0:
-                    jacobian = neighbour_reservoir.z.cached_jacobian_term
-                    dir_y1_to_x2 = neighbour_reservoir.z.rc_pos - center_x1
-                    jacobian *= abs(dir_y1_to_x2.normalized().dot(neighbour_reservoir.z.rc_normal)) / dir_y1_to_x2.dot(dir_y1_to_x2)
-                    p_hat *= clamp(jacobian, 0.0, 8.0)
-
-
-                selected = output_reservoir.merge(neighbour_reservoir, neighbour_reservoir.weight * p_hat, force_add)
-
-                if(selected):
-                    chosen_F = shifted_integrand
+                selected = output_reservoir.merge(neighbour_reservoir, neighbour_reservoir.weight * p_hat * neighbour_reservoir.M)
                 
                 valid_samples += 1
 
-            mis_weight = 1.0 / valid_samples
-            output_reservoir.finalize(chosen_F)
-            output_reservoir.weight *= mis_weight # biased, constant RMIS weight
+            center_p_hat = luminance(center_reservoir.z.F)
+            selected = output_reservoir.merge(center_reservoir, center_reservoir.weight * center_p_hat * center_reservoir.M)
+
+            # mis_weight = p_chosen / (p_sum)
+            output_reservoir.finalize()
+            # output_reservoir.weight *= mis_weight # biased, constant RMIS weight
             if pass_id == pass_total - 1:
-                self.color_buffer[u, v] += chosen_F * clamp(output_reservoir.weight, 0.0, 100.0) + self.nee_and_emission_buffer[u, v]
+                self.color_buffer[u, v] += output_reservoir.z.F * clamp(output_reservoir.weight, 0.0, 10.0) + self.nee_and_emission_buffer[u, v]
 
             output_reservoir.update_cached_jacobian_term(center_x1)
             self.spatial_reservoirs[u, v, (pass_id + 1) % 2] = output_reservoir
@@ -543,8 +659,8 @@ class Renderer:
     def accumulate(self):
         self.render(self.world.voxel_color_texture)
         if ti.static(USE_RESTIR_PT):
-            self.spatial_GRIS(0, 16.0, 6, 2)
-            self.spatial_GRIS(1, 16.0, 6, 2)
+            self.spatial_GRIS(0, 16.0, 12, 1)
+            # self.spatial_GRIS(1, 16.0, 6, 2)
         self.current_spp += 1
         self.current_frame += 1
 

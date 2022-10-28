@@ -3,6 +3,8 @@ import taichi as ti
 from taichi.math import *
 import numpy as np
 
+from renderer.math_utils import *
+
 @ti.dataclass
 class StorageSample:
     rc_pos : vec3
@@ -16,11 +18,11 @@ class StorageSample:
 
 @ti.dataclass
 class Sample:
-    L : vec3
+    F : vec3
     rc_pos : vec3 # when rc vertex is an escape vertex, this is a direction instead
     rc_normal : vec3 # when zero, that means rc vertex is an escape vertex
     rc_incident_dir : vec3 # when zero, that means path terminated here
-    rc_incident_L : vec3
+    rc_incident_L : vec3 # when rc vertex is an escape vertex, this is the sky colour
     rc_NEE_dir : vec3 # when zero, that means NEE visibility is zero
     rc_mat_info : ti.u32
     cached_jacobian_term : ti.f32
@@ -35,7 +37,7 @@ class Reservoir:
 
     @ti.func
     def init(self):
-        self.z = Sample(L=vec3(0,0,0), \
+        self.z = Sample(F=vec3(0,0,0), \
                         rc_pos=vec3(0,0,0), \
                         rc_normal=vec3(0,0,0), \
                         rc_incident_dir=vec3(0,0,0), \
@@ -62,13 +64,14 @@ class Reservoir:
         return selected
 
     @ti.func
-    def finalize(self, computed_integrand):
-        p_hat = vec3(0.33, 0.33, 0.33).dot(computed_integrand)
+    def finalize(self):
+        p_hat = luminance(self.z.F)
         if p_hat < 1e-6:
             self.weight = 0.0
         else:
-            self.weight = self.weight / p_hat
+            self.weight = self.weight / (p_hat*self.M)
+        
 # NOTES
 # when doing reconnection shift:
-#   account for ratio of dstPdf / srcPdf for both x_1 and x_rc
-#   when computing shifted integrand, it is brdf/pdf of first bounce times brdf/pdf of rc bounce times rc_L
+#   multiply Jacobian determinant by ratio of dstPdf / srcPdf for both x_1 and x_rc
+#   when computing shifted integrand, it is brdf of first bounce times brdf/pdf of rc bounce times rc_L
