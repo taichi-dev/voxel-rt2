@@ -59,6 +59,12 @@ def sample_cone_oriented(cos_theta_max, n):
     return ti.Vector([mat_dir[0], mat_dir[1], mat_dir[2]])
 
 @ti.func
+def cone_sample_pdf(cos_theta_max, cos_theta):
+    return 1.0/(2.0*np.pi*(1.0 - cos_theta_max)) if cos_theta >= cos_theta_max else 0.0
+    # This is actually wrong, since it assumes the light direction is alligned along the Y axis
+    
+
+@ti.func
 def interleave_bits_z3(v: ti.u32):
     # https://stackoverflow.com/questions/1024754/how-to-compute-a-3d-morton-number-interleave-the-bits-of-3-ints
     x = (v | (v << 16)) & 0x030000FF

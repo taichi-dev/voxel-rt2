@@ -314,9 +314,10 @@ class DisneyBSDF:
             v_dot_x = (v.dot(tang))
             v_dot_y = (v.dot(bitang))
 
-            if lobe_id == 0:
+            # 9 means all lobes
+            if lobe_id == 0 or lobe_id == 9:
                 bsdf += self.disney_diffuse(mat, n_dot_l, n_dot_v, l_dot_h) * (1.0 - mat.metallic)
-            elif lobe_id == 1:
+            if lobe_id == 1 or lobe_id == 9:
                 bsdf += self.disney_specular(mat, \
                                 n_dot_l, n_dot_v, \
                                 l_dot_h, n_dot_h, \
@@ -324,7 +325,7 @@ class DisneyBSDF:
                                 l_dot_x, l_dot_y, \
                                 v_dot_x, v_dot_y, \
                                 tang, bitang)*specular_mult
-            elif lobe_id == 2:
+            if lobe_id == 2 or lobe_id == 9:
                 bsdf += self.disney_clearcoat(mat, n_dot_l, n_dot_v, n_dot_h, l_dot_h)*specular_mult
         return bsdf
 
@@ -343,7 +344,7 @@ class DisneyBSDF:
         return diffuse_w, specular_w, clearcoat_w
 
     @ti.func
-    def pdf_disney(self, mat, v, n, l, tang, bitang, lobe_id):
+    def pdf_disney_lobewise(self, mat, v, n, l, tang, bitang, lobe_id):
 
         diffuse_w, specular_w, clearcoat_w = self.disney_get_lobe_probabilities(mat)
 
@@ -358,6 +359,18 @@ class DisneyBSDF:
         if isinf(pdf) or isnan(pdf):
             pdf = 1.0
             
+        return pdf
+
+    @ti.func
+    def pdf_disney(self, mat, v, n, l, tang, bitang):
+
+        diffuse_w, specular_w, clearcoat_w = self.disney_get_lobe_probabilities(mat)
+
+        pdf = 0.0
+        pdf += self.pdf_diffuse(mat, n, l) * diffuse_w
+        pdf += self.pdf_specular(mat, v, n, l, tang, bitang) * specular_w
+        pdf += self.pdf_clearcoat(mat, v, n, l, tang, bitang) * clearcoat_w
+
         return pdf
 
     @ti.func

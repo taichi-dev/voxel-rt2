@@ -7,6 +7,7 @@ from renderer.math_utils import *
 
 @ti.dataclass
 class StorageSample:
+    F : vec3
     rc_pos : vec3
     rc_normal : ti.types.vector(2, ti.f16)
     rc_incident_dir : ti.types.vector(2, ti.f16)
@@ -22,7 +23,7 @@ class Sample:
     rc_pos : vec3 # when rc vertex is an escape vertex, this is a direction instead
     rc_normal : vec3 # when zero, that means rc vertex is an escape vertex
     rc_incident_dir : vec3 # when zero, that means path terminated here
-    rc_incident_L : vec3 # when rc vertex is an escape vertex, this is the sky colour
+    rc_incident_L : vec3 # when rc vertex is an escape vertex, this is the sky/NEE colour
     rc_NEE_dir : vec3 # when zero, that means NEE visibility is zero
     rc_mat_info : ti.u32
     cached_jacobian_term : ti.f32
@@ -54,13 +55,27 @@ class Reservoir:
         self.z.cached_jacobian_term = dir_x1_to_x2.dot(dir_x1_to_x2)/abs(dir_x1_to_x2.normalized().dot(self.z.rc_normal))
 
     @ti.func
+    def input_sample(self, in_w, in_z):
+        self.M += 1
+
+        selected = False
+        if(in_w > 0.):
+            self.weight += in_w
+            selected = ti.random() * self.weight <= in_w
+            if selected:
+                self.z = in_z
+        return selected
+
+    @ti.func
     def merge(self, in_r, in_w, force_add = False):
         self.M += in_r.M
 
-        self.weight += in_w
-        selected = ti.random() * self.weight <= in_w or force_add
-        if selected:
-            self.z = in_r.z
+        selected = False
+        if(in_w > 0.):
+            self.weight += in_w
+            selected = ti.random() * self.weight <= in_w or force_add
+            if selected:
+                self.z = in_r.z
         return selected
 
     @ti.func
@@ -70,6 +85,14 @@ class Reservoir:
             self.weight = 0.0
         else:
             self.weight = self.weight / (p_hat*self.M)
+
+    @ti.func
+    def finalize_without_M(self):
+        p_hat = luminance(self.z.F)
+        if p_hat < 1e-6:
+            self.weight = 0.0
+        else:
+            self.weight = self.weight / (p_hat)
         
 # NOTES
 # when doing reconnection shift:

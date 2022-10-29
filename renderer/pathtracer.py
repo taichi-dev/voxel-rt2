@@ -38,7 +38,7 @@ class Renderer:
         self.light_direction = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.light_cone_cos_theta_max = ti.field(dtype=ti.f32, shape=())
         self.light_color = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.light_multiplier = 3.0
+        self.light_weight = ti.field(dtype=ti.f32, shape=())
 
         self.cast_voxel_hit = ti.field(ti.i32, shape=())
         self.cast_voxel_index = ti.Vector.field(3, ti.i32, shape=())
@@ -92,9 +92,6 @@ class Renderer:
         # TODO: Make this use the packed reservoirs and encode/decode on read/write
         self.spatial_reservoirs = Reservoir.field(shape=(image_res[0], image_res[1], 2))
 
-        # Auxiliaries
-        self.nee_and_emission_buffer = ti.Vector.field(3, dtype=ti.f32, shape=(image_res[0], image_res[1]))
-
         # Gbuffer
         self.gbuff_mat_id = ti.field(dtype=ti.u32, shape=(image_res[0], image_res[1]))
         self.gbuff_normals = ti.Vector.field(2, dtype=ti.f16, shape=(image_res[0], image_res[1]))
@@ -105,6 +102,7 @@ class Renderer:
         # Theta is half-angle of the light cone
         self.light_cone_cos_theta_max[None] = math.cos(light_cone_angle * 0.5)
         self.light_color[None] = light_color
+        self.light_weight = 3.0 # light brightness multiplier times cone sampling pdf
 
     @ti.func
     def _sdf_march(self, p, d):
@@ -246,6 +244,12 @@ class Renderer:
 
         return d, pos, contrib, throughput, hit_light, hit_background, input_sample_reservoir
 
+    @ti.func
+    def power_heuristic(self, a, b):
+        a_sqr = a*a
+        p_sum = max(a_sqr + b*b, 1e-4)
+        return a_sqr/p_sum
+
     @ti.kernel
     def render(self, colors: ti.types.texture(3)):
 
@@ -272,7 +276,10 @@ class Renderer:
             first_bounce_lobe_id = 0
             first_bounce_brdf = ti.Vector([0.0, 0.0, 0.0]) 
             first_bounce_invpdf = 1.0
-            first_vertex_NEE_and_emission = ti.Vector([0.0, 0.0, 0.0])
+            first_vertex_NEE = ti.Vector([0.0, 0.0, 0.0])
+            first_bounce_dir = ti.Vector([0.0, 0.0, 0.0]) 
+            light_sample_bsdf_pdf = 1.0 # first vertex 
+            light_sample_dir = ti.Vector([0.0, 0.0, 0.0])
             rc_bounce_lobe_id = 0
 
             is_sky_ray = False
@@ -294,6 +301,7 @@ class Renderer:
                     input_sample_reservoir.z.rc_pos = hit_pos
                     input_sample_reservoir.z.rc_normal = normal
                     input_sample_reservoir.z.rc_mat_info = encode_material(mat_id, albedo)
+                    first_bounce_dir = d
                 elif(depth == 2):
                     input_sample_reservoir.z.rc_incident_dir = d
 
@@ -316,6 +324,9 @@ class Renderer:
                         light_dir = sample_cone_oriented(
                             self.light_cone_cos_theta_max[None], self.light_direction[None])
                         dot = light_dir.dot(normal)
+
+                        light_sample_bsdf_pdf = self.bsdf.pdf_disney(hit_mat, view, normal, light_dir, tang, bitang)
+                        light_sample_dir = light_dir
                         if dot > 0:
                             hit_light_ = 0
                             dist, _, _, hit_light_, iters, smat = self.next_hit(
@@ -323,12 +334,13 @@ class Renderer:
                             )
                             if dist >= inf:
                                 # far enough to hit directional light
-                                input_sample_reservoir.z.rc_NEE_dir = light_dir
+                                if depth == 1:
+                                    input_sample_reservoir.z.rc_NEE_dir = light_dir
 
                                 light_bsdf = self.bsdf.disney_evaluate(hit_mat, view, normal, light_dir, tang, bitang)
-                                NEE_contrib = firefly_filter(light_bsdf * self.light_color[None] * self.light_multiplier * dot)
+                                NEE_contrib = firefly_filter(light_bsdf * self.light_weight * self.light_color[None] * dot)
                                 if depth == 0:
-                                    first_vertex_NEE_and_emission += throughput * NEE_contrib
+                                    first_vertex_NEE += throughput * NEE_contrib
                                 else:
                                     contrib += throughput * NEE_contrib
                                     
@@ -361,7 +373,7 @@ class Renderer:
                         sky_emission = firefly_filter(self.background_color[None])
                         contrib += throughput * sky_emission
                         if depth == 0:
-                            # first_vertex_NEE_and_emission += throughput * sky_emission
+                            # first_vertex_NEE += throughput * sky_emission
                             primary_pos = vec3(0.0, 0.0, 0.0)
                             is_sky_ray = True
                         elif depth == 1:
@@ -372,9 +384,7 @@ class Renderer:
                             input_sample_reservoir.z.rc_incident_L += throughput_after_rc * sky_emission
                     else:
                         # hit light voxel, terminate tracing
-                        if depth == 0:
-                            first_vertex_NEE_and_emission += albedo
-                        else:
+                        if depth > 0:
                             contrib += throughput * albedo
 
                         if depth >= 2:
@@ -400,22 +410,54 @@ class Renderer:
             input_sample_reservoir.z.lobes = rc_bounce_lobe_id*10 + first_bounce_lobe_id
             input_sample_reservoir.M = 1.0
             input_sample_reservoir.update_cached_jacobian_term(primary_pos)
-
-
-            p_hat = luminance(contrib)
-            input_sample_reservoir.weight = p_hat * first_bounce_invpdf # MIS weight here is just 1.0
-
-            input_sample_reservoir.finalize() # set reservoir W to now hold the initial 
-                                              # sample's unbiased contribution weight 
             
-            if is_sky_ray:
+            # MIS for primary vertex (we do it separate from other bounces because GRIS 
+            #                         will consider them separate samples and choose one)
+            if not is_sky_ray:
+                if ti.static(use_directional_light):
+                    bsdf_sample_bsdf_pdf = 1.0 / first_bounce_invpdf
+                    bsdf_sample_light_pdf = cone_sample_pdf(self.light_cone_cos_theta_max[None], self.light_direction[None].dot(first_bounce_dir))
+                    bsdf_sample_mis_weight = self.power_heuristic(bsdf_sample_bsdf_pdf, bsdf_sample_light_pdf)
+
+                    light_sample_light_pdf = cone_sample_pdf(self.light_cone_cos_theta_max[None], 1.0)
+                    # light_sample_bsdf_pdf = already defined!
+                    light_sample_mis_weight = self.power_heuristic(light_sample_light_pdf, light_sample_bsdf_pdf)
+
+
+                    input_sample_reservoir.z.F *= bsdf_sample_mis_weight
+                    p_hat = luminance(input_sample_reservoir.z.F)
+                    input_sample_reservoir.weight = p_hat * first_bounce_invpdf
+
+                    first_vertex_NEE *= light_sample_mis_weight
+                    light_sample_weight = luminance(first_vertex_NEE) # rcp pdf already applied in first_vertex_NEE
+                
+                    # Since our only NEE light is an angular light source, we will consider NEE vertices as just escape vertices.
+                    # So, the way this implementation of ReSTIR PT is set up, it will not work for NEE on arbitrary light sources.
+                    # This should be fine, since in our voxel scene, we won't have any explicit lights other than the sun,
+                    # and emissive materials are handled through BSDF sampling.
+                    # Hopefully nobody wants voxel-rt2 to support other types of explicit light sources.
+                    light_sample = Sample(F=first_vertex_NEE, \
+                                        rc_pos=light_sample_dir, \
+                                        rc_normal=vec3(0,0,0), \
+                                        rc_incident_dir=vec3(0,0,0), \
+                                        rc_incident_L=self.light_weight * self.light_color[None], \
+                                        rc_NEE_dir=vec3(0,0,0), \
+                                        rc_mat_info=0, \
+                                        cached_jacobian_term=1.0, lobes = 99) # 9 indicates all lobes will be used
+
+                    input_sample_reservoir.input_sample(light_sample_weight, light_sample)
+                else:
+                    p_hat = luminance(contrib)
+                    input_sample_reservoir.weight = p_hat * first_bounce_invpdf
+                input_sample_reservoir.finalize_without_M()
+            else:
                 input_sample_reservoir.weight = 1.0
+
 
             self.spatial_reservoirs[u, v, 0] = input_sample_reservoir
 
             if ti.static(not USE_RESTIR_PT):
-                self.color_buffer[u, v] += input_sample_reservoir.z.F * input_sample_reservoir.weight + first_vertex_NEE_and_emission
-            self.nee_and_emission_buffer[u, v] = first_vertex_NEE_and_emission
+                self.color_buffer[u, v] += input_sample_reservoir.z.F * first_bounce_invpdf + first_vertex_NEE
             # self.color_buffer[u, v] += contrib
 
     @ti.kernel
@@ -470,14 +512,14 @@ class Renderer:
                                                          rc_tang, rc_bitang, \
                                                          src_reservoir.z.lobes // 10)
             rc_brdf *= saturate(src_reservoir.z.rc_normal.dot(src_reservoir.z.rc_incident_dir))
-            dst_rc_pdf = self.bsdf.pdf_disney(rc_mat, \
+            dst_rc_pdf = self.bsdf.pdf_disney_lobewise(rc_mat, \
                                              -dir_to_rc_vertex, \
                                               src_reservoir.z.rc_normal, \
                                               src_reservoir.z.rc_incident_dir, \
                                               rc_tang, rc_bitang, \
                                               src_reservoir.z.lobes // 10)
             
-            src_rc_pdf = self.bsdf.pdf_disney(rc_mat, \
+            src_rc_pdf = self.bsdf.pdf_disney_lobewise(rc_mat, \
                                              -src_dir_to_rc_vertex, \
                                               src_reservoir.z.rc_normal, \
                                               src_reservoir.z.rc_incident_dir, \
@@ -485,14 +527,15 @@ class Renderer:
                                               src_reservoir.z.lobes // 10)
 
         rc_nee_brdf = vec3(0., 0., 0.)
+        # rc_nee_pdf = 1.0
         if rc_is_NEE_visible:
-            rc_nee_brdf = self.bsdf.disney_evaluate_lobewise(rc_mat, \
+            rc_nee_brdf = self.bsdf.disney_evaluate(rc_mat, \
                                                             -dir_to_rc_vertex, \
                                                              src_reservoir.z.rc_normal, \
                                                              src_reservoir.z.rc_NEE_dir, \
-                                                             rc_tang, rc_bitang, \
-                                                             src_reservoir.z.lobes // 10)
+                                                             rc_tang, rc_bitang)
             rc_nee_brdf *= saturate(src_reservoir.z.rc_normal.dot(src_reservoir.z.rc_NEE_dir))
+            # rc_nee_pdf = cone_sample_pdf(self.light_cone_cos_theta_max[None], self.light_direction[None].dot(src_reservoir.z.rc_NEE_dir))
 
         # primary dst vertex weights
         dst_tang, dst_bitang = make_orthonormal_basis(dst_normal)
@@ -503,21 +546,22 @@ class Renderer:
                                                           dir_to_rc_vertex, \
                                                           dst_tang, dst_bitang, \
                                                           src_reservoir.z.lobes % 10) # Evaluating the source reservoir's
-                                                                                      # BSDF lobe for primary vertex gives correct 
-                                                                                      # results. While using the destination's lobe
+                                                                                      # BSDF lobe for primary vertex of 
+                                                                                      # the shifted integrand gives correct 
+                                                                                      # results. But using the destination's lobe
                                                                                       # gives incorrect/noisy/bad results.
                                                                                       # TODO: Understand why...
         primary_brdf *= saturate(dst_normal.dot(dir_to_rc_vertex))
-        dst_primary_pdf = self.bsdf.pdf_disney(dst_material, \
+        dst_primary_pdf = self.bsdf.pdf_disney_lobewise(dst_material, \
                                                view, \
                                                dst_normal, \
                                                dir_to_rc_vertex, \
                                                dst_tang, dst_bitang, \
-                                               dst_reservoir.z.lobes % 10)
+                                               src_reservoir.z.lobes % 10)
         
         # primary src vertex weights
         src_tang, src_bitang = make_orthonormal_basis(src_normal)
-        src_primary_pdf = self.bsdf.pdf_disney(src_material, \
+        src_primary_pdf = self.bsdf.pdf_disney_lobewise(src_material, \
                                                (self.camera_pos[None] - src_pos).normalized(), \
                                                src_normal, \
                                                src_dir_to_rc_vertex, \
@@ -529,7 +573,7 @@ class Renderer:
             contrib += rc_brdf / dst_rc_pdf * src_reservoir.z.rc_incident_L # rc bounce
         if rc_is_escape_vertex:
             contrib += src_reservoir.z.rc_incident_L # sky emission
-        contrib += rc_nee_brdf * self.light_color[None] * self.light_multiplier # NEE at rc vertex
+        contrib += rc_nee_brdf * self.light_weight * self.light_color[None] # NEE at rc vertex
         contrib += vec3(0., 0., 0.) if rc_mat_id != 2 else rc_mat.base_col # emission at rc vertex
 
         contrib *= primary_brdf
@@ -537,8 +581,8 @@ class Renderer:
         # compute jacobian
         jacobian = 1.0 # limit case of escape vertices converges to one
 
-        # jacobian *= dst_rc_pdf / src_rc_pdf
-        # jacobian *= dst_primary_pdf / src_primary_pdf
+        # jacobian *= dst_rc_pdf / max(src_rc_pdf, 1e-4)
+        # jacobian *= dst_primary_pdf / max(src_primary_pdf, 1e-4)
 
         if not rc_is_escape_vertex:
             jacobian = src_reservoir.z.cached_jacobian_term
@@ -647,12 +691,12 @@ class Renderer:
             output_reservoir.finalize()
             # output_reservoir.weight *= mis_weight # biased, constant RMIS weight
             if pass_id == pass_total - 1:
-                self.color_buffer[u, v] += output_reservoir.z.F * clamp(output_reservoir.weight, 0.0, 10.0) + self.nee_and_emission_buffer[u, v]
+                emission = center_mat.base_col if center_mat_id == 2 else vec3(0.0, 0.0, 0.0)
+                self.color_buffer[u, v] += output_reservoir.z.F * clamp(output_reservoir.weight, 0.0, 10.0) + emission
 
             output_reservoir.update_cached_jacobian_term(center_x1)
             self.spatial_reservoirs[u, v, (pass_id + 1) % 2] = output_reservoir
 
-                
                 
 
     
