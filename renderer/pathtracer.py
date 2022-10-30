@@ -370,7 +370,8 @@ class Renderer:
                 else:
                     if closest == inf:
                         # Hit background
-                        sky_emission = firefly_filter(self.background_color[None])
+                        hit_sun = 1.0 if self.light_direction[None].dot(d) >= self.light_cone_cos_theta_max[None] else 0.0
+                        sky_emission = firefly_filter(self.background_color[None] + self.light_weight * self.light_color[None] * hit_sun)
                         contrib += throughput * sky_emission
                         if depth == 0:
                             # first_vertex_NEE += throughput * sky_emission
@@ -417,19 +418,23 @@ class Renderer:
                 if ti.static(use_directional_light):
                     bsdf_sample_bsdf_pdf = 1.0 / first_bounce_invpdf
                     bsdf_sample_light_pdf = cone_sample_pdf(self.light_cone_cos_theta_max[None], self.light_direction[None].dot(first_bounce_dir))
+                    if is_vec_zero(first_vertex_NEE):
+                        bsdf_sample_light_pdf = 0.0
+                    
                     bsdf_sample_mis_weight = self.power_heuristic(bsdf_sample_bsdf_pdf, bsdf_sample_light_pdf)
 
                     light_sample_light_pdf = cone_sample_pdf(self.light_cone_cos_theta_max[None], 1.0)
                     # light_sample_bsdf_pdf = already defined!
                     light_sample_mis_weight = self.power_heuristic(light_sample_light_pdf, light_sample_bsdf_pdf)
 
-
-                    input_sample_reservoir.z.F *= bsdf_sample_mis_weight
+                    if ti.static(not USE_RESTIR_PT):
+                        input_sample_reservoir.z.F *= bsdf_sample_mis_weight
                     p_hat = luminance(input_sample_reservoir.z.F)
-                    input_sample_reservoir.weight = p_hat * first_bounce_invpdf
+                    input_sample_reservoir.weight = bsdf_sample_mis_weight * p_hat * first_bounce_invpdf
 
-                    first_vertex_NEE *= light_sample_mis_weight
-                    light_sample_weight = luminance(first_vertex_NEE) # rcp pdf already applied in first_vertex_NEE
+                    if ti.static(not USE_RESTIR_PT):
+                        first_vertex_NEE *= light_sample_mis_weight
+                    light_sample_weight = light_sample_mis_weight * luminance(first_vertex_NEE) # rcp pdf already applied in first_vertex_NEE
                 
                     # Since our only NEE light is an angular light source, we will consider NEE vertices as just escape vertices.
                     # So, the way this implementation of ReSTIR PT is set up, it will not work for NEE on arbitrary light sources.
@@ -457,7 +462,9 @@ class Renderer:
             self.spatial_reservoirs[u, v, 0] = input_sample_reservoir
 
             if ti.static(not USE_RESTIR_PT):
-                self.color_buffer[u, v] += input_sample_reservoir.z.F * first_bounce_invpdf + first_vertex_NEE
+                primary_mat, primary_mat_id = decode_material(self.mats.mat_list, primary_mat_info)
+                emission = primary_mat.base_col if primary_mat_id == 2 else vec3(0.0, 0.0, 0.0)
+                self.color_buffer[u, v] += input_sample_reservoir.z.F * first_bounce_invpdf + first_vertex_NEE + emission
             # self.color_buffer[u, v] += contrib
 
     @ti.kernel
@@ -573,7 +580,8 @@ class Renderer:
             contrib += rc_brdf / dst_rc_pdf * src_reservoir.z.rc_incident_L # rc bounce
         if rc_is_escape_vertex:
             contrib += src_reservoir.z.rc_incident_L # sky emission
-        contrib += rc_nee_brdf * self.light_weight * self.light_color[None] # NEE at rc vertex
+        if ti.static(use_directional_light):
+            contrib += rc_nee_brdf * self.light_weight * self.light_color[None] # NEE at rc vertex
         contrib += vec3(0., 0., 0.) if rc_mat_id != 2 else rc_mat.base_col # emission at rc vertex
 
         contrib *= primary_brdf
