@@ -489,7 +489,7 @@ class Renderer:
     @ti.func
     def shift(self, dst_pos, dst_normal, dst_material, \
                     src_pos, src_normal, src_material, \
-                    dst_reservoir, src_reservoir):
+                    src_reservoir):
         # RC vertex info
         rc_is_escape_vertex = is_vec_zero(src_reservoir.z.rc_normal)
         rc_is_last_vertex = is_vec_zero(src_reservoir.z.rc_incident_dir)
@@ -645,6 +645,11 @@ class Renderer:
 
             valid_samples = 0
 
+            # For MIS weighting of RIS weights, we are doing defensive pairwise MIS.
+            # Algorithm from http://benedikt-bitterli.me/Data/dissertation.pdf 
+            # Using the generalized form from the ReSTIR PT paper.
+            canonical_mis_weight = 1.0
+
             for i in range(max_taps):
                 # neighbor_index = ti.cast(start_index + i, ti.u32) & offset_mask
                 # offset = ti.cast(self.reuse_offsets[neighbor_index] * max_radius, ti.i32)
@@ -654,10 +659,7 @@ class Renderer:
                 offset_radius = ti.sqrt(float(i + radius_shift) / ti.cast(max_taps, ti.f32)) * max_radius
 
                 offset = ti.cast(ti.Vector([ti.cos(angle) * offset_radius, ti.sin(angle) * offset_radius]), ti.i32)
-                # force_add = False
-                # if i == 0:
-                #     offset = ti.Vector([0, 0])
-                #     force_add = True
+
                 if offset.x == 0 and offset.y == 0:
                     continue
                 
@@ -676,28 +678,49 @@ class Renderer:
 
                 neighbour_mat, neighbour_mat_id = decode_material(self.mats.mat_list, self.gbuff_mat_id[tap_coord.x, tap_coord.y])
 
-                shifted_integrand, jacobian = self.shift(center_x1   , center_n1   , center_mat, \
-                                                    neighbour_x1, neighbour_n1, neighbour_mat, \
-                                                    output_reservoir, neighbour_reservoir)
+                # Center reservoir's sample shifted into neighbour pixel's domain
+                center_integrand, c_jacobian = self.shift(neighbour_x1, neighbour_n1, neighbour_mat, \
+                                                          center_x1   , center_n1   , center_mat, \
+                                                          center_reservoir)
                 
-                p_hat = luminance(shifted_integrand) * jacobian
+                # Neighbour reservoir's sample shifted into center pixel's domain
+                shifted_integrand, jacobian = self.shift(center_x1   , center_n1   , center_mat, \
+                                                         neighbour_x1, neighbour_n1, neighbour_mat, \
+                                                         neighbour_reservoir)
+                
+                # Update canonical sample's MIS weight
+                center_p_hat = luminance(center_integrand) * c_jacobian
+                canonical_weight = center_p_hat * neighbour_reservoir.M
+                canonical_weight /= center_p_hat * neighbour_reservoir.M + luminance(center_reservoir.z.F) * center_reservoir.M / ti.cast(max_taps, ti.f32)
+                canonical_mis_weight += 1 - canonical_weight
+
+                p_hat = luminance(shifted_integrand)
 
                 if jacobian < 1e-3: 
                     continue
 
-                neighbour_reservoir.z.F = shifted_integrand
-                neighbour_reservoir.z.lobes = neighbour_reservoir.z.lobes // 10 + center_reservoir.z.lobes % 10
+                # neighbour sample's MIS weight
+                p_hat_from_neighbour = luminance(shifted_integrand) / jacobian
 
-                selected = output_reservoir.merge(neighbour_reservoir, neighbour_reservoir.weight * p_hat * neighbour_reservoir.M)
+                neighbour_mis_weight = p_hat_from_neighbour * neighbour_reservoir.M
+                neighbour_mis_weight /= p_hat_from_neighbour * neighbour_reservoir.M + p_hat * center_reservoir.M / ti.cast(max_taps, ti.f32)
+                if isinf(neighbour_mis_weight) or isnan(neighbour_mis_weight):
+                    neighbour_mis_weight = 0.0
+
+                # Update neighbour reservoir sample to be the shifted one
+                neighbour_reservoir.z.F = shifted_integrand
+                # neighbour_reservoir.z.lobes = neighbour_reservoir.z.lobes // 10 + center_reservoir.z.lobes % 10
+
+                selected = output_reservoir.merge(neighbour_reservoir, neighbour_reservoir.weight * p_hat * jacobian * neighbour_mis_weight)
                 
                 valid_samples += 1
 
             center_p_hat = luminance(center_reservoir.z.F)
-            selected = output_reservoir.merge(center_reservoir, center_reservoir.weight * center_p_hat * center_reservoir.M)
+            selected = output_reservoir.merge(center_reservoir, center_reservoir.weight * center_p_hat * canonical_mis_weight)
 
-            # mis_weight = p_chosen / (p_sum)
-            output_reservoir.finalize()
-            # output_reservoir.weight *= mis_weight # biased, constant RMIS weight
+            output_reservoir.finalize_without_M()
+            output_reservoir.weight /= (valid_samples + 1)
+
             if pass_id == pass_total - 1:
                 emission = center_mat.base_col if center_mat_id == 2 else vec3(0.0, 0.0, 0.0)
                 self.color_buffer[u, v] += output_reservoir.z.F * clamp(output_reservoir.weight, 0.0, 10.0) + emission
