@@ -15,6 +15,10 @@ def sqr(x):
     return x*x
 
 @ti.func
+def is_vec_zero(x):
+    return x.dot(x) < 1e-5
+
+@ti.func
 def sample_cosine_weighted_hemisphere(n):
     # Shirley, et al, 2019. Sampling Transformation Zoo. Chapter 16, Ray Tracing Gems, p240
     u = ti.Vector([ti.random(), ti.random()])
@@ -53,6 +57,12 @@ def sample_cone(cos_theta_max):
 def sample_cone_oriented(cos_theta_max, n):
     mat_dir = make_tangent_space(n) @ sample_cone(cos_theta_max)
     return ti.Vector([mat_dir[0], mat_dir[1], mat_dir[2]])
+
+@ti.func
+def cone_sample_pdf(cos_theta_max, cos_theta):
+    return 1.0/(2.0*np.pi*(1.0 - cos_theta_max)) if cos_theta >= cos_theta_max else 0.0
+    # This is actually wrong, since it assumes the light direction is alligned along the Y axis
+    
 
 @ti.func
 def interleave_bits_z3(v: ti.u32):
@@ -138,6 +148,10 @@ def np_rotate_matrix(axis, theta):
         ]
     )
 
+@ti.func
+def luminance(x):
+    return ti.Vector([0.2125, 0.7154, 0.0721]).dot(x)
+
 # Uchimura 2017, "HDR theory and practice"
 # Math: https://www.desmos.com/calculator/gslcdxvipg
 # Source: https://www.slideshare.net/nikuque/hdr-theory-and-practicce-jp
@@ -185,7 +199,7 @@ def encodeUnitVector3x16(vec):
     vec.xy /= abs(vec.x) + abs(vec.y) + abs(vec.z)
 
     encoded = ((1.0 - abs(vec.yx)) * ti.Vector([1.0 if vec.x >= 0.0 else -1.0, 1.0 if vec.y >= 0.0 else -1.0]) if vec.z <= 0.0 else vec.xy) * 0.5 + 0.5
-    return ti.Vector([ti.cast(encoded.x, ti.f16), ti.cast(encoded.y, ti.f16)])
+    return ti.cast(ti.Vector([encoded.x, encoded.y]), ti.f16)
 
 @ti.func
 def decodeUnitVector3x16(a):
@@ -223,6 +237,6 @@ def decode_material(mat_list, enc : ti.u32):
     unshifted = unshifted & 255
     albedo = unshifted.yzw / 255.0
     
-    disney_mat = mat_list[unshifted[0]]
+    disney_mat = mat_list[ti.cast(unshifted[0], ti.i32)]
     disney_mat.base_col = albedo
-    return disney_mat
+    return disney_mat, unshifted[0]

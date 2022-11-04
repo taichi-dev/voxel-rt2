@@ -112,7 +112,7 @@ class Camera:
 
 class Scene:
     def __init__(self, voxel_edges=0.06, exposure=3):
-        ti.init(arch=ti.vulkan)
+        ti.init(arch=ti.vulkan, offline_cache=True)
         print(HELP_MSG)
         self.window = ti.ui.Window("Taichi Voxel Renderer", SCREEN_RES, vsync=False)
         self.camera = Camera(self.window, up=UP_DIR)
@@ -125,6 +125,7 @@ class Scene:
         )
 
         self.renderer.set_camera_pos(*self.camera.position)
+        self.renderer.set_directional_light((1, 1, 1), 0.1, (0.0, 0.0, 0.0)) # set default values
         if not os.path.exists("screenshot"):
             os.makedirs("screenshot")
 
