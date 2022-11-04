@@ -308,10 +308,10 @@ class DisneyBSDF:
         pdf = 1.0
         rand = ti.random()
         chosen_lobe = -1
-        if(rand < diffuse_w):
+        if(rand <= diffuse_w):
             sample_dir, pdf = self.sample_diffuse(mat, n)
             chosen_lobe = 0
-        elif(rand < diffuse_w + specular_w):
+        elif(rand <= diffuse_w + specular_w):
             sample_dir, pdf = self.sample_specular(mat, v, n, tang, bitang)
             chosen_lobe = 1
         else:
