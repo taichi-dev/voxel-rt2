@@ -3,7 +3,7 @@ import taichi as ti
 from taichi.math import *
 
 scene = Scene(voxel_edges=0, exposure=30)
-scene.set_directional_light((-1, 1, -1), 0.2, (0.1, 0.1, 0.1)) # (1, 0.8, 0.6)
+# scene.set_directional_light((-1, 1, -1), 0.2, (0.1, 0.1, 0.1)) # (1, 0.8, 0.6)
 scene.set_floor(0, (1.0, 1.0, 1.0))
 
 n = 50
