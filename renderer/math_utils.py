@@ -16,7 +16,7 @@ def sqr(x):
 
 @ti.func
 def is_vec_zero(x):
-    return x.dot(x) < 1e-5
+    return x.dot(x) < 1e-7
 
 @ti.func
 def sample_cosine_weighted_hemisphere(n):
