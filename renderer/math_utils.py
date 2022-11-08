@@ -195,14 +195,14 @@ def Unpack2x8(pack):
 
 # octahedral encoding
 @ti.func
-def encodeUnitVector3x16(vec):
+def encode_unit_vector_3x16(vec):
     vec.xy /= abs(vec.x) + abs(vec.y) + abs(vec.z)
 
     encoded = ((1.0 - abs(vec.yx)) * ti.Vector([1.0 if vec.x >= 0.0 else -1.0, 1.0 if vec.y >= 0.0 else -1.0]) if vec.z <= 0.0 else vec.xy) * 0.5 + 0.5
     return ti.cast(ti.Vector([encoded.x, encoded.y]), ti.f16)
 
 @ti.func
-def decodeUnitVector3x16(a):
+def decode_unit_vector_3x16(a):
     encoded = ti.cast(a, ti.f32) * 2.0 - 1.0
     vec = ti.Vector([encoded.x, encoded.y, 1.0 - abs(encoded.x) - abs(encoded.y)])
     t = max(-vec.z, 0.0)
@@ -240,3 +240,19 @@ def decode_material(mat_list, enc : ti.u32):
     disney_mat = mat_list[ti.cast(unshifted[0], ti.i32)]
     disney_mat.base_col = albedo
     return disney_mat, unshifted[0]
+
+# Encode 4 floats in (0,1) in a uint32 with arbitrary precision for each
+@ti.func
+def encode_u32_arb(data : ti.types.vector(4, ti.f32), size : ti.types.vector(4, ti.i32)):
+    mult = pow(2.0, ti.cast(size, ti.f32)) - 1.0
+    shift = ti.cast(ti.Vector([0, size.x, size.x + size.y, size.x + size.y + size.z]), ti.u32)
+    shifted = ti.cast(data*mult + 0.5, ti.u32) << shift
+    return shifted[0] | shifted[1] | shifted[2] | shifted[3]
+
+@ti.func
+def decode_u32_arb(enc : ti.u32, size : ti.types.vector(4, ti.i32)):
+    max_value = ti.cast(pow(2, size) - 1, ti.u32)
+    shift = ti.cast(ti.Vector([0, size.x, size.x + size.y, size.x + size.y + size.z]), ti.u32)
+    unshifted = enc >> shift
+    unshifted = unshifted & max_value
+    return ti.cast(unshifted, ti.f32) / ti.cast(max_value, ti.f32)

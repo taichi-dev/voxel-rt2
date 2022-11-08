@@ -90,7 +90,7 @@ class Renderer:
 
         # Reservoir storage
         # TODO: Make this use the packed reservoirs and encode/decode on read/write
-        self.spatial_reservoirs = Reservoir.field(shape=(image_res[0], image_res[1], 2))
+        self.spatial_reservoirs = StorageReservoir.field(shape=(image_res[0], image_res[1], 2))
 
         # Gbuffer
         self.gbuff_mat_id = ti.field(dtype=ti.u32, shape=(image_res[0], image_res[1]))
@@ -293,7 +293,7 @@ class Renderer:
 
                 # Write to gbuffer and reservoir
                 if(depth == 0):
-                    primary_normal = encodeUnitVector3x16(normal)
+                    primary_normal = encode_unit_vector_3x16(normal)
                     primary_pos = hit_pos
                     primary_mat_info = encode_material(mat_id, albedo)
                     
@@ -477,7 +477,7 @@ class Renderer:
                 input_sample_reservoir.weight = 1.0
 
 
-            self.spatial_reservoirs[u, v, 0] = input_sample_reservoir
+            self.spatial_reservoirs[u, v, 0] = input_sample_reservoir.encode()
 
             if ti.static(not USE_RESTIR_PT):
                 primary_mat, primary_mat_id = decode_material(self.mats.mat_list, primary_mat_info)
@@ -665,7 +665,9 @@ class Renderer:
             radius_shift = ti.random()
 
             # Get center reservoir
-            center_reservoir = self.spatial_reservoirs[u, v, pass_id % 2]
+            center_reservoir_enc = self.spatial_reservoirs[u, v, pass_id % 2]
+            center_reservoir = Reservoir()
+            center_reservoir.decode(center_reservoir_enc)
 
             # Initialize output reservoir
             output_reservoir = Reservoir()
@@ -673,7 +675,7 @@ class Renderer:
 
             # Variables of center pixel
             center_x1 = self.gbuff_position[u, v]
-            center_n1 = decodeUnitVector3x16(self.gbuff_normals[u, v])
+            center_n1 = decode_unit_vector_3x16(self.gbuff_normals[u, v])
 
             if is_vec_zero(center_x1):
                 self.color_buffer[u, v] += center_reservoir.z.F
@@ -709,9 +711,11 @@ class Renderer:
                 
                 tap_coord = ti.Vector([u, v]) + offset
 
-                neighbour_n1 = decodeUnitVector3x16(self.gbuff_normals[tap_coord.x, tap_coord.y])
+                neighbour_n1 = decode_unit_vector_3x16(self.gbuff_normals[tap_coord.x, tap_coord.y])
                 neighbour_x1 = self.gbuff_position[tap_coord.x, tap_coord.y]
-                neighbour_reservoir = self.spatial_reservoirs[tap_coord.x, tap_coord.y, pass_id % 2]
+                neighbour_reservoir_enc = self.spatial_reservoirs[tap_coord.x, tap_coord.y, pass_id % 2]
+                neighbour_reservoir = Reservoir()
+                neighbour_reservoir.decode(neighbour_reservoir_enc)
 
                 neighbour_dist = distance(self.camera_pos[None], neighbour_x1)
 
@@ -780,7 +784,7 @@ class Renderer:
                 self.color_buffer[u, v] += output_reservoir.z.F * clamp(output_reservoir.weight, 0.0, 50.0) + emission
 
             output_reservoir.update_cached_jacobian_term(center_x1)
-            self.spatial_reservoirs[u, v, (pass_id + 1) % 2] = output_reservoir
+            self.spatial_reservoirs[u, v, (pass_id + 1) % 2] = output_reservoir.encode()
 
                 
 
