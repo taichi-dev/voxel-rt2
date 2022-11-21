@@ -6,29 +6,36 @@ import numpy as np
 from renderer.math_utils import *
 
 @ti.dataclass
-class StorageSample:
+class StorageReservoir:
+    M : ti.f16
+    W : ti.f16
     F : vec3
     rc_pos : vec3
-    rc_normal : ti.types.vector(2, ti.f16)
+    rc_normal_and_NEE_dir : ti.u32
     rc_incident_dir : ti.types.vector(2, ti.f16)
     rc_incident_L : vec3
-    rc_NEE_dir : ti.types.vector(2, ti.f16)
     rc_mat_info : ti.u32
-    cached_jacobian_term : ti.f16 # When I do encoding for reservoirs, put cached_jacobian_term and lobes into one uint32
+    cached_jacobian_term : ti.f16
+    lobes : ti.i8
 
 
 @ti.dataclass
 class Sample:
     F : vec3
     rc_pos : vec3 # when rc vertex is an escape vertex, this is a direction instead
+
     rc_normal : vec3 # when zero, that means rc vertex is an escape vertex
+
     rc_incident_dir : vec3 # when zero, that means path terminated here
+
     rc_incident_L : vec3 # when rc vertex is an escape vertex, this is the sky/NEE colour
+
     rc_NEE_dir : vec3 # when zero, that means NEE visibility is zero
-    rc_mat_info : ti.u32
+
+    rc_mat_info : ti.u32 # stores mat_id an albedo sequentially in the bits
+
     cached_jacobian_term : ti.f32
     lobes : ti.i32 # lobe indices bsdf sampling at x1 and x_rc
-
 
 @ti.dataclass
 class Reservoir:
@@ -93,6 +100,48 @@ class Reservoir:
             self.weight = 0.0
         else:
             self.weight = self.weight / (p_hat)
+
+    @ti.func
+    def encode(self):
+        enc = StorageReservoir()
+        enc.M = ti.cast(self.M, ti.f16)
+        enc.W = ti.cast(self.weight, ti.f16)
+        enc.F = self.z.F
+        enc.rc_pos = self.z.rc_pos
+
+        oct_rc_normal = encode_unit_vector_3x16(self.z.rc_normal)
+        oct_rc_NEE_dir = encode_unit_vector_3x16(self.z.rc_NEE_dir)
+        enc.rc_normal_and_NEE_dir = encode_u32_arb(ti.Vector([oct_rc_normal.x, oct_rc_normal.y, \
+                                                              oct_rc_NEE_dir.x, oct_rc_NEE_dir.y]), \
+                                                   ti.Vector([8, 8, 8, 8]))
+        
+        enc.rc_incident_dir = encode_unit_vector_3x16(self.z.rc_incident_dir)
+        enc.rc_incident_L = self.z.rc_incident_L
+        enc.rc_mat_info = self.z.rc_mat_info
+        enc.cached_jacobian_term = ti.cast(self.z.cached_jacobian_term, ti.f16)
+        enc.lobes = ti.cast(self.z.lobes, ti.i8)
+
+        return enc
+    
+    @ti.func
+    def decode(self, enc):
+        self.M = ti.cast(enc.M, ti.f32)
+        self.weight = ti.cast(enc.W, ti.f32)
+        self.z.F = enc.F
+        self.z.rc_pos = enc.rc_pos
+
+        data = decode_u32_arb(enc.rc_normal_and_NEE_dir, ti.Vector([8, 8, 8, 8]))
+        self.z.rc_normal = decode_unit_vector_3x16(data.xy)
+        self.z.rc_NEE_dir = decode_unit_vector_3x16(data.zw)
+
+        self.z.rc_incident_dir = decode_unit_vector_3x16(enc.rc_incident_dir)
+        self.z.rc_incident_L = enc.rc_incident_L
+        self.z.rc_mat_info = enc.rc_mat_info
+        self.z.cached_jacobian_term = ti.cast(enc.cached_jacobian_term, ti.f32)
+        self.z.lobes = ti.cast(enc.lobes, ti.i32)
+
+
+
         
 # NOTES
 # when doing reconnection shift:

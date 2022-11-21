@@ -16,6 +16,7 @@ HELP_MSG = """
 Camera:
 * Drag with your left mouse button to rotate
 * Press W/A/S/D/Q/E to move
+* P to screenshot
 ====================================================
 """
 
@@ -168,6 +169,16 @@ class Scene:
         current_fov = self.renderer.fov[None]
         initial_t = time.time()
         last_t = initial_t
+
+        aspect = SCREEN_RES[0]/SCREEN_RES[1]
+
+        # taichi built-in camera. We use this only so that we can easily get the OpenGL standard
+        # projection and view matrices without needing to do any extra work.
+        tcamera = ti.ui.Camera()
+        tcamera.up(0, 1, 0)
+        tcamera.z_far(10.0)
+        tcamera.z_near(0.01)
+
         while self.window.running:
             should_reset_framebuffer = False
 
@@ -179,21 +190,32 @@ class Scene:
                 should_reset_framebuffer = True
             last_t = t
 
+            # update built-in camera
+            tcamera.position(self.camera._camera_pos[0], self.camera._camera_pos[1], self.camera._camera_pos[2])
+            tcamera.lookat(self.camera._lookat_pos[0], self.camera._lookat_pos[1], self.camera._lookat_pos[2])
+            tcamera.fov(np.rad2deg(current_fov))
+            self.renderer.set_proj_mat(tcamera.get_projection_matrix(aspect))
+            self.renderer.set_view_mat(tcamera.get_view_matrix())
+            
+
             if should_reset_framebuffer:
                 self.renderer.reset_framebuffer()
 
             for i in range(samples_per_frame):
                 self.renderer.accumulate()
             img = self.renderer.fetch_image()
-            # if self.window.is_pressed("p"):
-            #     timestamp = datetime.today().strftime("%Y-%m-%d-%H%M%S")
-            #     dirpath = os.getcwd()
-            #     main_filename = os.path.split(__main__.__file__)[1]
-            #     fname = os.path.join(
-            #         dirpath, "screenshot", f"{main_filename}-{timestamp}.jpg"
-            #     )
-            #     ti.tools.image.imwrite(img, fname)
-            #     print(f"Screenshot has been saved to {fname}")
+
+            self.renderer.copy_prev_matrices()
+
+            if self.window.is_pressed("p"):
+                timestamp = datetime.today().strftime("%Y-%m-%d-%H%M%S")
+                dirpath = os.getcwd()
+                main_filename = os.path.split(__main__.__file__)[1]
+                fname = os.path.join(
+                    dirpath, "screenshot", f"{main_filename}-{timestamp}.jpg"
+                )
+                ti.tools.image.imwrite(img, fname)
+                print(f"Screenshot has been saved to {fname}")
             canvas.set_image(img)
             if samples > 1024:
                 last_1k_samples_time = time.time() - initial_t
