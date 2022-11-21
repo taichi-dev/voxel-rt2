@@ -11,7 +11,7 @@ from renderer.math_utils import *
 from renderer.space_transformations import *
 from renderer.reservoir import *
 
-USE_RESTIR_PT = False
+USE_RESTIR_PT = True
 
 MAX_RAY_DEPTH = 4
 use_directional_light = True
@@ -96,11 +96,16 @@ class Renderer:
         # Gbuffer
         self.gbuff_mat_id = ti.field(dtype=ti.u32)
         self.gbuff_normals = ti.Vector.field(2, dtype=ti.f16)
-        # self.gbuff_depth = ti.field(dtype=ti.f32)
+        self.gbuff_depth = ti.field(dtype=ti.f32)
         self.gbuff_position = ti.Vector.field(3, dtype=ti.f32)
+        self.gbuff_prev_depth = ti.field(dtype=ti.f32)
+        self.gbuff_prev_normals = ti.Vector.field(2, dtype=ti.f16)
         ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ij, (32, 32)).place(self.gbuff_mat_id)
         ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ij, (32, 32)).place(self.gbuff_normals)
         ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ij, (32, 32)).place(self.gbuff_position)
+        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ij, (32, 32)).place(self.gbuff_prev_depth)
+        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ij, (32, 32)).place(self.gbuff_prev_normals)
+        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ij, (32, 32)).place(self.gbuff_depth)
         # self.gbuff_mat_id = ti.field(dtype=ti.u32, shape=(image_res[0], image_res[1]))
         # self.gbuff_normals = ti.Vector.field(2, dtype=ti.f16, shape=(image_res[0], image_res[1]))
         # self.gbuff_position = ti.Vector.field(3, dtype=ti.f32, shape=(image_res[0], image_res[1])) 
@@ -458,11 +463,11 @@ class Renderer:
                 # else:
                 #     throughput /= max_c
 
-            # primary_pos_view = world_to_view(primary_pos, self.view_mat[None])
+            primary_pos_view = world_to_view(primary_pos, self.view_mat[None])
             
             # Write to gbuffer
             self.gbuff_normals[u, v]  = primary_normal
-            # self.gbuff_depth[u, v] = view_to_screen(primary_pos_view.xyz, self.proj_mat[None]).z
+            self.gbuff_depth[u, v] = view_to_screen(primary_pos_view.xyz, self.proj_mat[None]).z
             self.gbuff_position[u, v] = primary_pos
             self.gbuff_mat_id[u, v] = primary_mat_info
 
@@ -717,17 +722,17 @@ class Renderer:
             output_reservoir.init()
 
             # Variables of center pixel
-            # center_depth = self.gbuff_depth[u, v]
-            # center_x1 = screen_to_view(texcoord, center_depth, self.proj_mat_inv[None])
-            # center_dist = length(center_x1)
-            # center_x1 = view_to_world(center_x1, self.view_mat_inv[None]) # get in world space
-            center_x1 = self.gbuff_position[u, v]
+            center_depth = self.gbuff_depth[u, v]
+            center_x1 = screen_to_view(texcoord, center_depth, self.proj_mat_inv[None])
+            center_dist = length(center_x1)
+            center_x1 = view_to_world(center_x1, self.view_mat_inv[None]) # get in world space
+            # center_x1 = self.gbuff_position[u, v]
             center_dist = distance(center_x1, self.camera_pos[None])
-            # center_depth = linearize_depth(center_depth, self.proj_mat_inv[None]) # linearize for use in depth comparison
+            center_depth = linearize_depth(center_depth, self.proj_mat_inv[None]) # linearize for use in depth comparison
             center_n1 = decode_unit_vector_3x16(self.gbuff_normals[u, v])
 
             if is_vec_zero(center_x1):
-                self.color_buffer[u, v] = center_reservoir.z.F
+                self.color_buffer[u, v] = ti.cast(center_reservoir.z.F, ti.f16)
                 continue
 
             center_mat, center_mat_id = decode_material(self.mats.mat_list, self.gbuff_mat_id[u, v])
@@ -760,11 +765,11 @@ class Renderer:
                 tap_texcoord = (tap_coord + 0.5) * self.inv_image_res
 
                 neighbour_n1 = decode_unit_vector_3x16(self.gbuff_normals[tap_coord.x, tap_coord.y])
-                # neighbour_depth = self.gbuff_depth[tap_coord.x, tap_coord.y]
-                # neighbour_x1 = screen_to_view(tap_texcoord, neighbour_depth, self.proj_mat_inv[None])
-                # neighbour_x1 = view_to_world(neighbour_x1, self.view_mat_inv[None]) # get in world space
-                # neighbour_depth = linearize_depth(neighbour_depth, self.proj_mat_inv[None]) # linearize for use in depth comparison
-                neighbour_x1 = self.gbuff_position[tap_coord.x, tap_coord.y]
+                neighbour_depth = self.gbuff_depth[tap_coord.x, tap_coord.y]
+                neighbour_x1 = screen_to_view(tap_texcoord, neighbour_depth, self.proj_mat_inv[None])
+                neighbour_x1 = view_to_world(neighbour_x1, self.view_mat_inv[None]) # get in world space
+                neighbour_depth = linearize_depth(neighbour_depth, self.proj_mat_inv[None]) # linearize for use in depth comparison
+                # neighbour_x1 = self.gbuff_position[tap_coord.x, tap_coord.y]
                 neighbour_dist = distance(neighbour_x1, self.camera_pos[None])
                 neighbour_reservoir_enc = self.spatial_reservoirs[tap_coord.x, tap_coord.y, pass_id % 2]
                 neighbour_reservoir = Reservoir()
@@ -834,7 +839,7 @@ class Renderer:
 
             if pass_id == pass_total - 1:
                 emission = center_mat.base_col if center_mat_id == 2 else vec3(0.0, 0.0, 0.0)
-                self.color_buffer[u, v] = output_reservoir.z.F * clamp(output_reservoir.weight, 0.0, 50.0) + emission
+                self.color_buffer[u, v] = ti.cast(output_reservoir.z.F * clamp(output_reservoir.weight, 0.0, 50.0) + emission, ti.f16)
 
             output_reservoir.update_cached_jacobian_term(center_x1)
             self.spatial_reservoirs[u, v, (pass_id + 1) % 2] = output_reservoir.encode()
@@ -849,41 +854,101 @@ class Renderer:
         pos.xyz = pos.xyz * 0.5 + 0.5
         return pos.xyz
 
+    @ti.func
+    def catmullrom(self, x):
+        x2 = x * x
+        x3 = x * x * x
+
+        fx = 0.0
+
+        if x < 1.0:
+            fx = 1.5 * x3 - 2.5 * x2 + 1.0
+        elif x < 2.0:
+            fx = -0.5 * x3 + 2.5 * x2 - 4.0 * x + 2.0
+        
+        return fx
+    
+    @ti.func
+    def catmullrom2(self, v):
+        return self.catmullrom(v.x) * self.catmullrom(v.y)
+
+    @ti.func
+    def history_filter(self, uv, center_depth, center_normal):
+        ires = ti.cast(ti.Vector([self.image_res[0], self.image_res[1]]), ti.i32)
+
+        fcoord = ti.Vector([uv.x * self.image_res[0] - 0.5, uv.y * self.image_res[1] - 0.5])
+        icoord = ti.cast(fcoord, ti.i32)
+        f = fract(fcoord)
+
+        col_sum = ti.Vector([0.0, 0.0, 0.0, 0.0])
+        col_max = ti.Vector([0.0, 0.0, 0.0, 0.0])
+        col_min = ti.Vector([999999.0, 999999.0, 999999.0, 999999.0])
+
+        weight_sum = 0.0
+        for x in range(-1, 3):
+            for y in range(-1, 3):
+                tap_coord = icoord + ti.cast(ti.Vector([x, y]), ti.i32)
+
+                if any(clamp(tap_coord, ti.Vector([0, 0]), ires - 1) != tap_coord):
+                    continue
+
+                w = self.catmullrom2(abs(ti.Vector([x, y]) - f))
+
+                tap_depth = linearize_depth(self.gbuff_prev_depth[tap_coord.x, tap_coord.y], self.proj_mat_inv[None])
+                tap_normal = decode_unit_vector_3x16(self.gbuff_prev_normals[tap_coord.x, tap_coord.y])
+
+                w *= 1.0 if abs(tap_depth - center_depth)/center_depth < 0.05 else 0.0
+                w *= 1.0 if center_normal.dot(tap_normal) > 0.642 else 0.0
+
+                col = self.history_buffer[tap_coord.x, tap_coord.y, 0]
+                col_max = max(col_max, col)
+                col_min = min(col_min, col)
+
+                col_sum += col * w
+                weight_sum += w
+        
+        col_sum /= weight_sum
+
+        return weight_sum, max(clamp(col_sum, col_min, col_max), ti.Vector([0., 0., 0., 1.])) # anti-ringing
+
     @ti.kernel
     def temporal_filter(self):
 
         ti.loop_config(block_dim=128)
         for u, v in self.color_buffer:
-            center_x1 = self.gbuff_position[u, v]
+            texcoord = (ti.Vector([u, v]) + 0.5) * self.inv_image_res
+            # center_x1 = self.gbuff_position[u, v]
+            center_nonlinear_depth = self.gbuff_depth[u, v]
+            center_depth = linearize_depth(center_nonlinear_depth, self.proj_mat_inv[None])
+            center_n1 = decode_unit_vector_3x16(self.gbuff_normals[u, v])
+            center_x1 = view_to_world(screen_to_view(texcoord, center_nonlinear_depth, self.proj_mat_inv[None]), self.view_mat_inv[None])
 
             if is_vec_zero(center_x1):
                 continue
 
-            center_dist = distance(center_x1, self.camera_pos[None])
-            # center_depth = linearize_depth(center_depth, self.proj_mat_inv[None]) # linearize for use in depth comparison
-            center_n1 = decode_unit_vector_3x16(self.gbuff_normals[u, v])
-
-
             current = ti.cast(self.color_buffer[u, v], ti.f32)
-
-            history = ti.Vector([current.x, current.y, current.z, 1.0])
 
             # reproject
             reprojected_pos = self.reproject(center_x1)
-            reprojected_coord = ti.cast(ti.Vector([reprojected_pos.x * self.image_res[0], reprojected_pos.y * self.image_res[1]]), ti.i32)
 
-            # previous frame pos is on screen
-            if all(clamp(reprojected_pos.xy, 0.0, 1.0) == reprojected_pos.xy):
-                history = self.history_buffer[reprojected_coord.x, reprojected_coord.y, 0]
+            # sample history
+            w_sum, history = self.history_filter(reprojected_pos.xy, linearize_depth(reprojected_pos.z, self.proj_mat_inv[None]), center_n1)
+
+            if w_sum > 1e-3:
                 history.w = min(history.w + 1.0, 50.0)
                 history.xyz = mix(history.xyz, current, 1.0 / history.w)
-            
+            else:
+                history = ti.Vector([current.x, current.y, current.z, 1.0])
+
             self.history_buffer[u, v, 1] = ti.cast(history, ti.f16)
             self.color_buffer[u, v] = ti.cast(history.xyz, ti.f16)
 
         ti.loop_config(block_dim=128)
         for u, v in self.color_buffer:
             self.history_buffer[u, v, 0] = self.history_buffer[u, v, 1]
+            self.gbuff_prev_depth[u, v] = self.gbuff_depth[u, v]
+            self.gbuff_prev_normals[u, v] = self.gbuff_normals[u, v]
+            
 
 
 
