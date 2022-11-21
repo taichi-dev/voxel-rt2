@@ -8,9 +8,10 @@ from renderer.materials import MaterialList
 from renderer.voxel_world import VoxelWorld
 from renderer.raytracer import VoxelOctreeRaytracer
 from renderer.math_utils import *
+from renderer.space_transformations import *
 from renderer.reservoir import *
 
-USE_RESTIR_PT = True
+USE_RESTIR_PT = False
 
 MAX_RAY_DEPTH = 4
 use_directional_light = True
@@ -25,6 +26,7 @@ def firefly_filter(v):
 class Renderer:
     def __init__(self, dx, image_res, up, voxel_edges, exposure=3):
         self.image_res = image_res
+        self.inv_image_res = ti.Vector([1.0 / image_res[0], 1.0 / image_res[1]])
         self.aspect_ratio = image_res[0] / image_res[1]
         self.vignette_strength = 0.9
         self.vignette_radius = 0.0
@@ -32,7 +34,8 @@ class Renderer:
         self.current_spp = 0
         self.current_frame = 0
 
-        self.color_buffer = ti.Vector.field(3, dtype=ti.f32)
+        self.color_buffer = ti.Vector.field(3, dtype=ti.f16)
+        self.history_buffer = ti.Vector.field(4, dtype=ti.f16)
         self.fov = ti.field(dtype=ti.f32, shape=())
 
         self.light_direction = ti.Vector.field(3, dtype=ti.f32, shape=())
@@ -46,6 +49,7 @@ class Renderer:
         self.exposure = exposure
 
         self.camera_pos = ti.Vector.field(3, dtype=ti.f32, shape=())
+        self.prev_camera_pos = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.look_at = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.up = ti.Vector.field(3, dtype=ti.f32, shape=())
 
@@ -59,6 +63,7 @@ class Renderer:
         # each thread block will process 16x8 pixels in a batch instead of a 32 pixel row in a batch
         # Thus we pay less divergence penalty on hard paths (e.g. voxel edges)
         ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.color_buffer)
+        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ijk, (32, 32, 2)).place(self.history_buffer)
 
         self.voxel_grid_res = 128
         self.world = VoxelWorld(dx, self.voxel_grid_res, voxel_edges)
@@ -75,27 +80,30 @@ class Renderer:
         self.bsdf = DisneyBSDF()
         self.mats = MaterialList()
 
-        # Hardcoded spatial reuse offsets (Temporary)
-        self.reuse_offsets = ti.Vector.field(2, dtype=ti.f32, shape=(9))
-        self.reuse_offsets[0] = ti.Vector([-0.490245, -0.860320])
-        self.reuse_offsets[0] = ti.Vector([0.529266, -0.580959])
-        self.reuse_offsets[0] = ti.Vector([0.039021, 0.558722])
-        self.reuse_offsets[0] = ti.Vector([-0.451224, -0.301598])
-        self.reuse_offsets[0] = ti.Vector([0.568287, -0.022237])
-        self.reuse_offsets[0] = ti.Vector([0.078042, -0.882556])
-        self.reuse_offsets[0] = ti.Vector([-0.412203, 0.257125])
-        self.reuse_offsets[0] = ti.Vector([0.607308, 0.536486])
-        self.reuse_offsets[0] = ti.Vector([0.117063, -0.323834])
+        # matrices
+        self.proj_mat = ti.Matrix.field(4, 4, dtype=ti.f32, shape=())
+        self.proj_mat_inv = ti.Matrix.field(4, 4, dtype=ti.f32, shape=())
+        self.view_mat = ti.Matrix.field(4, 4, dtype=ti.f32, shape=())
+        self.view_mat_inv = ti.Matrix.field(4, 4, dtype=ti.f32, shape=())
+        self.prev_proj_mat = ti.Matrix.field(4, 4, dtype=ti.f32, shape=())
+        self.prev_view_mat = ti.Matrix.field(4, 4, dtype=ti.f32, shape=())
         
 
         # Reservoir storage
-        # TODO: Make this use the packed reservoirs and encode/decode on read/write
-        self.spatial_reservoirs = StorageReservoir.field(shape=(image_res[0], image_res[1], 2))
+        self.spatial_reservoirs = StorageReservoir.field()
+        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ijk, (32, 32, 2)).place(self.spatial_reservoirs)
 
         # Gbuffer
-        self.gbuff_mat_id = ti.field(dtype=ti.u32, shape=(image_res[0], image_res[1]))
-        self.gbuff_normals = ti.Vector.field(2, dtype=ti.f16, shape=(image_res[0], image_res[1]))
-        self.gbuff_position = ti.Vector.field(3, dtype=ti.f32, shape=(image_res[0], image_res[1])) # TODO: use depth instead and reconstruct pos
+        self.gbuff_mat_id = ti.field(dtype=ti.u32)
+        self.gbuff_normals = ti.Vector.field(2, dtype=ti.f16)
+        # self.gbuff_depth = ti.field(dtype=ti.f32)
+        self.gbuff_position = ti.Vector.field(3, dtype=ti.f32)
+        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ij, (32, 32)).place(self.gbuff_mat_id)
+        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ij, (32, 32)).place(self.gbuff_normals)
+        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ij, (32, 32)).place(self.gbuff_position)
+        # self.gbuff_mat_id = ti.field(dtype=ti.u32, shape=(image_res[0], image_res[1]))
+        # self.gbuff_normals = ti.Vector.field(2, dtype=ti.f16, shape=(image_res[0], image_res[1]))
+        # self.gbuff_position = ti.Vector.field(3, dtype=ti.f32, shape=(image_res[0], image_res[1])) 
 
     def set_directional_light(self, direction, light_cone_angle, light_color):
         self.light_direction[None] = ti.Vector(direction).normalized()
@@ -116,6 +124,14 @@ class Renderer:
     @ti.func
     def _sdf_color(self, p):
         return self.floor_color[None]
+    
+    @ti.func
+    def world_to_voxel(self, pos):
+        return self.world.voxel_inv_size * pos - self.world.voxel_grid_offset
+
+    @ti.func
+    def voxel_to_world(self, pos):
+        return self.world.voxel_size * (pos + self.world.voxel_grid_offset)
 
     @ti.func
     def _trace_sdf(
@@ -143,7 +159,7 @@ class Renderer:
         shadow_ray: ti.template()
     ):
         # Re-scale the ray origin from world space to voxel grid space [0, voxel_grid_res)
-        eye_pos_scaled = self.world.voxel_inv_size * eye_pos - self.world.voxel_grid_offset
+        eye_pos_scaled = self.world_to_voxel(eye_pos)
 
         hit_distance, voxel_index, hit_normal, iters = self.voxel_raytracer.raytrace(
             eye_pos_scaled, d, eps, inf)
@@ -205,20 +221,45 @@ class Renderer:
     @ti.kernel
     def set_fov(self, fov: ti.f32):
         self.fov[None] = fov
+    
+    @ti.kernel
+    def set_proj_mat(self, M: ti.types.ndarray()):
+        for i in ti.static(range(4)):  # a parallel for loop
+            for j in ti.static(range(4)):
+                self.proj_mat[None][j, i] = M[i, j]
+        self.proj_mat_inv[None] = inverse(self.proj_mat[None])
+            
+
+    @ti.kernel
+    def set_view_mat(self, M: ti.types.ndarray()):
+        for i in ti.static(range(4)):  # a parallel for loop
+            for j in ti.static(range(4)):
+                self.view_mat[None][j, i] = M[i, j]
+        self.view_mat_inv[None] = inverse(self.view_mat[None])
+
+    @ti.kernel
+    def copy_prev_matrices(self):
+        self.prev_proj_mat[None] = self.proj_mat[None]
+        self.prev_view_mat[None] = self.view_mat[None]
+        self.prev_camera_pos[None] = self.camera_pos[None]
 
     @ti.func
     def get_cast_dir(self, u, v):
-        half_fov = self.fov[None] * 0.5
-        d = (self.look_at[None] - self.camera_pos[None]).normalized()
-        fu = (
-            2 * half_fov * (u + ti.random(ti.f32)) / self.image_res[1]
-            - half_fov * self.aspect_ratio
-            - 1e-5
-        )
-        fv = 2 * half_fov * (v + ti.random(ti.f32)) / self.image_res[1] - half_fov - 1e-5
-        du = d.cross(self.up[None]).normalized()
-        dv = du.cross(d).normalized()
-        d = (d + fu * du + fv * dv).normalized()
+        # half_fov = self.fov[None] * 0.5
+        # d = (self.look_at[None] - self.camera_pos[None]).normalized()
+        # fu = (
+        #     2 * half_fov * (u + 0.5) / self.image_res[1]
+        #     - half_fov * self.aspect_ratio
+        #     - 1e-5
+        # )
+        # fv = 2 * half_fov * (v + 0.5) / self.image_res[1] - half_fov - 1e-5
+        # du = d.cross(self.up[None]).normalized()
+        # dv = du.cross(d).normalized()
+        # d = (d + fu * du + fv * dv).normalized()
+        # return d
+        texcoord = (ti.Vector([u, v]) + 0.5) * self.inv_image_res
+        d = screen_to_view(texcoord, 1.0, self.proj_mat_inv[None]).normalized()
+        d = view_to_world(d, self.view_mat_inv[None], 0.0)
         return d
 
     def prepare_data(self):
@@ -417,9 +458,11 @@ class Renderer:
                 # else:
                 #     throughput /= max_c
 
+            # primary_pos_view = world_to_view(primary_pos, self.view_mat[None])
             
             # Write to gbuffer
             self.gbuff_normals[u, v]  = primary_normal
+            # self.gbuff_depth[u, v] = view_to_screen(primary_pos_view.xyz, self.proj_mat[None]).z
             self.gbuff_position[u, v] = primary_pos
             self.gbuff_mat_id[u, v] = primary_mat_info
 
@@ -482,7 +525,8 @@ class Renderer:
             if ti.static(not USE_RESTIR_PT):
                 primary_mat, primary_mat_id = decode_material(self.mats.mat_list, primary_mat_info)
                 emission = primary_mat.base_col if primary_mat_id == 2 else vec3(0.0, 0.0, 0.0)
-                self.color_buffer[u, v] += input_sample_reservoir.z.F * first_bounce_invpdf + first_vertex_NEE + emission
+
+                self.color_buffer[u, v] = input_sample_reservoir.z.F * first_bounce_invpdf + first_vertex_NEE + emission
             # self.color_buffer[u, v] += contrib
 
     @ti.kernel
@@ -495,7 +539,7 @@ class Renderer:
                     self.vignette_radius, 0.0)
 
             ldr_color = ti.pow(
-                uchimura(self.color_buffer[i, j] * darken * self.exposure / samples), 1.0 / 2.2)
+                uchimura(self.color_buffer[i, j] * darken * self.exposure), 1.0 / 2.2)
             img.store(ti.Vector([i, j]), ti.Vector([ldr_color.r, ldr_color.g, ldr_color.b, 1.0]))
 
     def reset_framebuffer(self):
@@ -571,11 +615,8 @@ class Renderer:
                                                           dir_to_rc_vertex, \
                                                           dst_tang, dst_bitang, \
                                                           src_reservoir.z.lobes % 10) # Evaluating the source reservoir's
-                                                                                      # BSDF lobe for primary vertex of 
-                                                                                      # the shifted integrand gives correct 
-                                                                                      # results. But using the destination's lobe
-                                                                                      # gives incorrect/noisy/bad results.
-                                                                                      # TODO: Understand why...
+                                                                                      # BSDF lobe since that is part of
+                                                                                      # the source sample.
         primary_brdf *= saturate(dst_normal.dot(dir_to_rc_vertex))
         # dst_primary_pdf = self.bsdf.pdf_disney_lobewise(dst_material, \
         #                                        view, \
@@ -649,8 +690,10 @@ class Renderer:
     def spatial_GRIS(self, pass_id : ti.i32, max_radius : ti.f32, max_taps : ti.i32, pass_total : ti.i32, colors: ti.types.texture(3)):
 
         # Render
-        ti.loop_config(block_dim=128)
-        for u, v in self.color_buffer:
+        ti.loop_config(block_dim=256)
+        for u, v in self.gbuff_position:
+
+            texcoord = (ti.Vector([u, v]) + 0.5) * self.inv_image_res
             
             start_index = ti.cast(ti.random() * max_taps, ti.u32)
             offset_mask = ti.cast(max_taps - 1, ti.u32)
@@ -674,11 +717,17 @@ class Renderer:
             output_reservoir.init()
 
             # Variables of center pixel
+            # center_depth = self.gbuff_depth[u, v]
+            # center_x1 = screen_to_view(texcoord, center_depth, self.proj_mat_inv[None])
+            # center_dist = length(center_x1)
+            # center_x1 = view_to_world(center_x1, self.view_mat_inv[None]) # get in world space
             center_x1 = self.gbuff_position[u, v]
+            center_dist = distance(center_x1, self.camera_pos[None])
+            # center_depth = linearize_depth(center_depth, self.proj_mat_inv[None]) # linearize for use in depth comparison
             center_n1 = decode_unit_vector_3x16(self.gbuff_normals[u, v])
 
             if is_vec_zero(center_x1):
-                self.color_buffer[u, v] += center_reservoir.z.F
+                self.color_buffer[u, v] = center_reservoir.z.F
                 continue
 
             center_mat, center_mat_id = decode_material(self.mats.mat_list, self.gbuff_mat_id[u, v])
@@ -686,8 +735,6 @@ class Renderer:
            
             view = (self.camera_pos[None] - center_x1).normalized()
             tang, bitang = make_orthonormal_basis(center_n1)
-
-            center_dist = distance(self.camera_pos[None], center_x1)
 
             valid_samples = 0
 
@@ -710,14 +757,18 @@ class Renderer:
                     continue
                 
                 tap_coord = ti.Vector([u, v]) + offset
+                tap_texcoord = (tap_coord + 0.5) * self.inv_image_res
 
                 neighbour_n1 = decode_unit_vector_3x16(self.gbuff_normals[tap_coord.x, tap_coord.y])
+                # neighbour_depth = self.gbuff_depth[tap_coord.x, tap_coord.y]
+                # neighbour_x1 = screen_to_view(tap_texcoord, neighbour_depth, self.proj_mat_inv[None])
+                # neighbour_x1 = view_to_world(neighbour_x1, self.view_mat_inv[None]) # get in world space
+                # neighbour_depth = linearize_depth(neighbour_depth, self.proj_mat_inv[None]) # linearize for use in depth comparison
                 neighbour_x1 = self.gbuff_position[tap_coord.x, tap_coord.y]
+                neighbour_dist = distance(neighbour_x1, self.camera_pos[None])
                 neighbour_reservoir_enc = self.spatial_reservoirs[tap_coord.x, tap_coord.y, pass_id % 2]
                 neighbour_reservoir = Reservoir()
                 neighbour_reservoir.decode(neighbour_reservoir_enc)
-
-                neighbour_dist = distance(self.camera_pos[None], neighbour_x1)
 
                 neighbour_primary_lobe_id = neighbour_reservoir.z.lobes % 10
 
@@ -767,7 +818,9 @@ class Renderer:
             force_add_canonical = False
             dir_to_rc_vertex = output_reservoir.z.rc_pos if is_vec_zero(output_reservoir.z.rc_normal) else (output_reservoir.z.rc_pos - center_x1).normalized()
             dist, _, _, hit_light_, iters, smat = self.next_hit(center_x1 + center_n1*0.007*center_dist, dir_to_rc_vertex, inf, colors, shadow_ray=True)
-            if dist < inf and abs(dist - length(output_reservoir.z.rc_pos - center_x1)) > 0.1:
+            actual_dist = inf if is_vec_zero(output_reservoir.z.rc_normal) else distance(center_x1, output_reservoir.z.rc_pos)
+
+            if dist < inf and abs(dist - actual_dist) > 0.1*actual_dist:
                 output_reservoir.weight = 0.0
                 force_add_canonical = True
             
@@ -781,12 +834,63 @@ class Renderer:
 
             if pass_id == pass_total - 1:
                 emission = center_mat.base_col if center_mat_id == 2 else vec3(0.0, 0.0, 0.0)
-                self.color_buffer[u, v] += output_reservoir.z.F * clamp(output_reservoir.weight, 0.0, 50.0) + emission
+                self.color_buffer[u, v] = output_reservoir.z.F * clamp(output_reservoir.weight, 0.0, 50.0) + emission
 
             output_reservoir.update_cached_jacobian_term(center_x1)
             self.spatial_reservoirs[u, v, (pass_id + 1) % 2] = output_reservoir.encode()
 
-                
+    @ti.func
+    def reproject(self, world_pos):
+        pos = ti.Vector([world_pos.x, world_pos.y, world_pos.z, 1.0])
+        # pos.xyz += self.camera_pos[None] - self.prev_camera_pos[None]
+        pos = self.prev_view_mat[None] @ pos
+        pos = self.prev_proj_mat[None] @ pos
+        pos.xyz /= pos.w
+        pos.xyz = pos.xyz * 0.5 + 0.5
+        return pos.xyz
+
+    @ti.kernel
+    def temporal_filter(self):
+
+        ti.loop_config(block_dim=512)
+        for u, v in self.gbuff_position:
+            center_x1 = self.gbuff_position[u, v]
+
+            if is_vec_zero(center_x1):
+                continue
+
+            center_dist = distance(center_x1, self.camera_pos[None])
+            # center_depth = linearize_depth(center_depth, self.proj_mat_inv[None]) # linearize for use in depth comparison
+            center_n1 = decode_unit_vector_3x16(self.gbuff_normals[u, v])
+
+
+            current = self.color_buffer[u, v]
+
+            history = ti.Vector([current.x, current.y, current.z, 1.0])
+
+            # reproject
+            reprojected_pos = self.reproject(center_x1)
+            reprojected_coord = ti.cast(ti.Vector([reprojected_pos.x * self.image_res[0], reprojected_pos.y * self.image_res[1]]), ti.i32)
+
+            # previous frame pos is on screen
+            if all(clamp(reprojected_pos.xy, 0.0, 1.0) == reprojected_pos.xy):
+                history = self.history_buffer[reprojected_coord.x, reprojected_coord.y, 0]
+                history.w = min(history.w + 1.0, 50.0)
+                history.xyz = mix(history.xyz, current, 1.0 / history.w)
+            
+            self.history_buffer[u, v, 1] = history
+            self.color_buffer[u, v] = history.xyz
+
+        ti.loop_config(block_dim=512)
+        for u, v in self.gbuff_position:
+            self.history_buffer[u, v, 0] = self.history_buffer[u, v, 1]
+
+
+
+
+
+
+
 
     
     def accumulate(self):
@@ -794,6 +898,7 @@ class Renderer:
         if ti.static(USE_RESTIR_PT):
             self.spatial_GRIS(0, 16.0, 12, 1, self.world.voxel_color_texture)
             # self.spatial_GRIS(1, 16.0, 6, 2, self.world.voxel_color_texture)
+        self.temporal_filter()
         self.current_spp += 1
         self.current_frame += 1
 
