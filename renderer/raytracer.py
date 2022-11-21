@@ -70,14 +70,12 @@ class VoxelOctreeRaytracer:
                     ti.atomic_or(self.occupancy[idx >> 5], bit)
 
     @ti.func
-    def raytrace(self, origin, _direction, ray_min_t, ray_max_t):
+    def raytrace(self, origin, direction, ray_min_t, ray_max_t):
         # Initialize result to be empty
         hit_distance = inf
         ipos_lod0 = ti.Vector([-1, -1, -1])
-        hit_normal = ti.Vector([0, 0, 0])
+        hit_normal = ti.Vector([0.0, 0.0, 0.0])
         iters = 0
-
-        direction = _direction.normalized()
 
         # Check the bounding box of the entire volume
         bbox_intersect, bbox_near, bbox_far = ray_aabb_intersection(
@@ -92,7 +90,7 @@ class VoxelOctreeRaytracer:
             # We are on or inside the bbox
             # Prepare DDA data
             initial_p = origin + direction * (hit_distance + eps)
-            ipos_lod0 = ti.math.clamp(ti.cast(ti.floor(initial_p), ti.i32), 0, self.voxel_grid_res - 1)
+            ipos_lod0 = ti.cast(ti.math.clamp(ti.floor(initial_p), 0.0, self.voxel_grid_res - 1.0), ti.i32)
             inv_dir = 1.0 / ti.abs(direction)
             current_lod = 0
             far = min(ray_max_t, bbox_far) - eps
@@ -100,7 +98,7 @@ class VoxelOctreeRaytracer:
             # Compute initial normal in case we hit boundry voxels
             initial_dist = ti.abs(initial_p - self.voxel_grid_res * 0.5)
             max_dist = ti.max(initial_dist.x, initial_dist.y, initial_dist.z)
-            hit_normal = ti.cast(max_dist == initial_dist, ti.i32)
+            hit_normal = ti.cast(max_dist == initial_dist, ti.f32)
             
             while iters < 512:
                 if hit_distance > far:
@@ -124,28 +122,28 @@ class VoxelOctreeRaytracer:
                     break
                 
                 # Find parametric edge distances (time to hit)
-                cell_size = 1 << current_lod
-                cell_base = ipos * cell_size
+                cell_size = ti.cast(1 << current_lod, ti.f32)
+                cell_base = ti.cast(ipos, ti.f32) * cell_size
                 voxel_pos = origin + direction * hit_distance
-                frac_pos = voxel_pos - ti.cast(cell_base, ti.f32)
+                frac_pos = voxel_pos - cell_base
                 dist = frac_pos
                 for i in ti.static(range(3)):
                     if direction[i] > 0.0:
-                        dist[i] = cell_size - dist[i]
+                        dist[i] = cell_size - frac_pos[i]
                 t = dist * inv_dir
                 
                 # If empty, find intersection point with the nearest plane of current cell
                 min_t = ti.min(t.x, t.y, t.z)
                 # Compute the integer hit point within current cell
                 edge_frac_pos = ti.math.clamp(
-                    ti.cast(ti.floor(frac_pos + min_t * direction), ti.i32),
-                    0, cell_size - 1)
+                    ti.floor(frac_pos + min_t * direction),
+                    0.0, cell_size - 1.0)
                 # Advance floating point values
                 hit_distance += min_t
                 # The hit normal is the normal of the nearest plane
-                hit_normal = ti.cast(t == min_t, ti.i32) * ti.cast(ti.math.sign(direction), ti.i32)
+                hit_normal = ti.cast(t == min_t, ti.f32) * ti.math.sign(direction)
                 # Next cell would be `hit_point + hit_normal`. All integer thus water-tight
-                ipos_lod0 = cell_base + edge_frac_pos + hit_normal
+                ipos_lod0 = ti.cast(cell_base + edge_frac_pos + hit_normal, ti.i32)
                 current_lod = ti.min(self.n_lods - 1, current_lod + 1)
 
                 iters += 1
