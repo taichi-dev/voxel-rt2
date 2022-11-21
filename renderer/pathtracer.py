@@ -63,7 +63,7 @@ class Renderer:
         # each thread block will process 16x8 pixels in a batch instead of a 32 pixel row in a batch
         # Thus we pay less divergence penalty on hard paths (e.g. voxel edges)
         ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.color_buffer)
-        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ijk, (32, 32, 2)).place(self.history_buffer)
+        ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ijk, (16, 8, 2)).place(self.history_buffer)
 
         self.voxel_grid_res = 128
         self.world = VoxelWorld(dx, self.voxel_grid_res, voxel_edges)
@@ -526,7 +526,7 @@ class Renderer:
                 primary_mat, primary_mat_id = decode_material(self.mats.mat_list, primary_mat_info)
                 emission = primary_mat.base_col if primary_mat_id == 2 else vec3(0.0, 0.0, 0.0)
 
-                self.color_buffer[u, v] = input_sample_reservoir.z.F * first_bounce_invpdf + first_vertex_NEE + emission
+                self.color_buffer[u, v] = ti.cast(input_sample_reservoir.z.F * first_bounce_invpdf + first_vertex_NEE + emission, ti.f16)
             # self.color_buffer[u, v] += contrib
 
     @ti.kernel
@@ -852,8 +852,8 @@ class Renderer:
     @ti.kernel
     def temporal_filter(self):
 
-        ti.loop_config(block_dim=512)
-        for u, v in self.gbuff_position:
+        ti.loop_config(block_dim=128)
+        for u, v in self.color_buffer:
             center_x1 = self.gbuff_position[u, v]
 
             if is_vec_zero(center_x1):
@@ -864,7 +864,7 @@ class Renderer:
             center_n1 = decode_unit_vector_3x16(self.gbuff_normals[u, v])
 
 
-            current = self.color_buffer[u, v]
+            current = ti.cast(self.color_buffer[u, v], ti.f32)
 
             history = ti.Vector([current.x, current.y, current.z, 1.0])
 
@@ -878,11 +878,11 @@ class Renderer:
                 history.w = min(history.w + 1.0, 50.0)
                 history.xyz = mix(history.xyz, current, 1.0 / history.w)
             
-            self.history_buffer[u, v, 1] = history
-            self.color_buffer[u, v] = history.xyz
+            self.history_buffer[u, v, 1] = ti.cast(history, ti.f16)
+            self.color_buffer[u, v] = ti.cast(history.xyz, ti.f16)
 
-        ti.loop_config(block_dim=512)
-        for u, v in self.gbuff_position:
+        ti.loop_config(block_dim=128)
+        for u, v in self.color_buffer:
             self.history_buffer[u, v, 0] = self.history_buffer[u, v, 1]
 
 
