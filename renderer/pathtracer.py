@@ -3,7 +3,7 @@ import taichi as ti
 from taichi.math import *
 import numpy as np
 
-from renderer.bsdf import DisneyBSDF
+from renderer.bsdf import *
 from renderer.materials import MaterialList
 from renderer.voxel_world import VoxelWorld
 from renderer.raytracer import VoxelOctreeRaytracer
@@ -35,7 +35,9 @@ class Renderer:
         self.current_frame = 0
 
         self.color_buffer = ti.Vector.field(3, dtype=ti.f16)
+        self.color_buffer_specular = ti.Vector.field(3, dtype=ti.f16)
         self.history_buffer = ti.Vector.field(4, dtype=ti.f16)
+        self.history_buffer_specular = ti.Vector.field(4, dtype=ti.f16)
         self.fov = ti.field(dtype=ti.f32, shape=())
 
         self.light_direction = ti.Vector.field(3, dtype=ti.f32, shape=())
@@ -63,7 +65,9 @@ class Renderer:
         # each thread block will process 16x8 pixels in a batch instead of a 32 pixel row in a batch
         # Thus we pay less divergence penalty on hard paths (e.g. voxel edges)
         ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.color_buffer)
+        ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.color_buffer_specular)
         ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ijk, (16, 8, 2)).place(self.history_buffer)
+        ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ijk, (16, 8, 2)).place(self.history_buffer_specular)
 
         self.voxel_grid_res = 128
         self.world = VoxelWorld(dx, self.voxel_grid_res, voxel_edges)
@@ -316,13 +320,15 @@ class Renderer:
             primary_normal = ti.cast(ti.Vector([0.0, 0.0]), ti.f16)
             primary_pos = vec3(0,0,0)
             primary_mat_info = ti.cast(0, ti.u32)
+            primary_albedo = vec3(1.,1.,1.)
 
             # values to extract from PT
             throughput_after_rc = ti.Vector([1.0, 1.0, 1.0]) 
             first_bounce_lobe_id = 0
             first_bounce_brdf = ti.Vector([0.0, 0.0, 0.0]) 
             first_bounce_invpdf = 1.0
-            first_vertex_NEE = ti.Vector([0.0, 0.0, 0.0])
+            first_vertex_NEE_diffuse = ti.Vector([0.0, 0.0, 0.0])
+            first_vertex_NEE_specular = ti.Vector([0.0, 0.0, 0.0])
             first_bounce_dir = ti.Vector([0.0, 0.0, 0.0]) 
             first_light_sample_bsdf_pdf = 1.0 # first vertex 
             first_light_sample_dir = ti.Vector([0.0, 0.0, 0.0])
@@ -342,6 +348,7 @@ class Renderer:
                     primary_normal = encode_unit_vector_3x16(normal)
                     primary_pos = hit_pos
                     primary_mat_info = encode_material(mat_id, albedo)
+                    primary_albedo = albedo
                     
                 elif(depth == 1):
                     input_sample_reservoir.z.rc_pos = hit_pos
@@ -395,22 +402,20 @@ class Renderer:
                                     light_sample_light_pdf = cone_sample_pdf(self.light_cone_cos_theta_max[None], 1.0)
                                     light_sample_mis_weight = self.power_heuristic(light_sample_light_pdf, light_sample_bsdf_pdf)
 
-                                light_bsdf = self.bsdf.disney_evaluate(hit_mat, view, normal, light_dir, tang, bitang)
-                                NEE_contrib = firefly_filter(light_sample_mis_weight * light_bsdf * self.light_weight * self.light_color[None] * dot)
+                                light_bsdf_diffuse, light_bsdf_specular = self.bsdf.disney_evaluate_split(hit_mat, view, normal, light_dir, tang, bitang)
+                                NEE_contrib_diffuse = firefly_filter(light_sample_mis_weight * light_bsdf_diffuse * self.light_weight * self.light_color[None] * dot)
+                                NEE_contrib_specular = firefly_filter(light_sample_mis_weight * light_bsdf_specular * self.light_weight * self.light_color[None] * dot)
                                 if depth == 0:
-                                    first_vertex_NEE += throughput * NEE_contrib
+                                    first_vertex_NEE_diffuse  += throughput * NEE_contrib_diffuse
+                                    first_vertex_NEE_specular += throughput * NEE_contrib_specular
                                 else:
-                                    contrib += throughput * NEE_contrib
+                                    contrib += throughput * (NEE_contrib_diffuse + NEE_contrib_specular)
                                     
                                 if depth >= 2:
-                                    input_sample_reservoir.z.rc_incident_L += throughput_after_rc * NEE_contrib
+                                    input_sample_reservoir.z.rc_incident_L += throughput_after_rc * (NEE_contrib_diffuse + NEE_contrib_specular)
                     
                     # Sample next bounce
                     d, bsdf, pdf, lobe_id = self.bsdf.sample_disney(hit_mat, view, normal, tang, bitang)
-                    # d = sample_cosine_weighted_hemisphere(normal)
-                    # pdf = saturate(d.dot(normal)) / np.pi
-                    # bsdf = self.bsdf.disney_evaluate(hit_mat, view, normal, d, tang, bitang)
-                    # lobe_id = 0
 
                     # Apply weight to throughput (Not on first bounce)
                     bounce_weight = bsdf * saturate(d.dot(normal))
@@ -437,7 +442,6 @@ class Renderer:
                         sky_emission = firefly_filter(self.background_color[None] + self.light_weight * self.light_color[None] * hit_sun)
                         contrib += throughput * sky_emission
                         if depth == 0:
-                            # first_vertex_NEE += throughput * sky_emission
                             primary_pos = vec3(0.0, 0.0, 0.0)
                             is_sky_ray = True
                         elif depth == 1:
@@ -471,18 +475,20 @@ class Renderer:
             self.gbuff_position[u, v] = primary_pos
             self.gbuff_mat_id[u, v] = primary_mat_info
 
-            # Finish populating reservoir fields
+            # Populate reservoir fields with BSDF sample
             input_sample_reservoir.z.F = contrib
             input_sample_reservoir.z.lobes = rc_bounce_lobe_id*10 + first_bounce_lobe_id
             input_sample_reservoir.M = 1.0
             input_sample_reservoir.update_cached_jacobian_term(primary_pos)
+
             
             # MIS for primary vertex (we do it separate from other bounces because they will be used on GRIS weights)
+            chose_NEE_sample = False
             if not is_sky_ray:
                 if ti.static(use_directional_light):
                     bsdf_sample_bsdf_pdf = 1.0 / first_bounce_invpdf
                     bsdf_sample_light_pdf = cone_sample_pdf(self.light_cone_cos_theta_max[None], self.light_direction[None].dot(first_bounce_dir))
-                    if is_vec_zero(first_vertex_NEE):
+                    if is_vec_zero(first_vertex_NEE_diffuse + first_vertex_NEE_specular):
                         bsdf_sample_light_pdf = 0.0
                     
                     bsdf_sample_mis_weight = self.power_heuristic(bsdf_sample_bsdf_pdf, bsdf_sample_light_pdf)
@@ -497,8 +503,9 @@ class Renderer:
                     input_sample_reservoir.weight = bsdf_sample_mis_weight * p_hat * first_bounce_invpdf
 
                     if ti.static(not USE_RESTIR_PT):
-                        first_vertex_NEE *= light_sample_mis_weight
-                    light_sample_weight = light_sample_mis_weight * luminance(first_vertex_NEE) # rcp pdf already applied in first_vertex_NEE
+                        first_vertex_NEE_diffuse *= light_sample_mis_weight
+                        first_vertex_NEE_specular *= light_sample_mis_weight
+                    light_sample_weight = light_sample_mis_weight * luminance(first_vertex_NEE_diffuse + first_vertex_NEE_specular) # rcp pdf already applied in first_vertex_NEE
                 
                     # Since our only NEE light is an angular light source, we will consider NEE vertices as just escape vertices.
                     # So, the way this implementation of ReSTIR PT is set up, it will not work for NEE on arbitrary light sources.
@@ -507,7 +514,7 @@ class Renderer:
                     # Hopefully nobody wants voxel-rt2 to support other types of explicit light sources.
                     # If so, handling would be required for these types of light sources,
                     # probably storing light_pdf in the reservoir sample.
-                    light_sample = Sample(F=first_vertex_NEE, \
+                    light_sample = Sample(F=first_vertex_NEE_diffuse + first_vertex_NEE_specular, \
                                         rc_pos=first_light_sample_dir, \
                                         rc_normal=vec3(0,0,0), \
                                         rc_incident_dir=vec3(0,0,0), \
@@ -516,7 +523,7 @@ class Renderer:
                                         rc_mat_info=0, \
                                         cached_jacobian_term=1.0, lobes = 99) # 9 indicates all lobes will be used
 
-                    input_sample_reservoir.input_sample(light_sample_weight, light_sample)
+                    chose_NEE_sample = input_sample_reservoir.input_sample(light_sample_weight, light_sample)
                 else:
                     p_hat = luminance(contrib)
                     input_sample_reservoir.weight = p_hat * first_bounce_invpdf
@@ -526,13 +533,30 @@ class Renderer:
 
 
             self.spatial_reservoirs[u, v, 0] = input_sample_reservoir.encode()
-
-            if ti.static(not USE_RESTIR_PT):
+            
+            diffuse = vec3(0., 0., 0.)
+            specular = vec3(0., 0., 0.)
+            if ti.static(not USE_RESTIR_PT): # add both BSDF and NEE sample with MIS weighting applied
                 primary_mat, primary_mat_id = decode_material(self.mats.mat_list, primary_mat_info)
                 emission = primary_mat.base_col if primary_mat_id == 2 else vec3(0.0, 0.0, 0.0)
 
-                self.color_buffer[u, v] = ti.cast(input_sample_reservoir.z.F * first_bounce_invpdf + first_vertex_NEE + emission, ti.f16)
-            # self.color_buffer[u, v] += contrib
+                diffuse += contrib * first_bounce_invpdf + emission if first_bounce_lobe_id == LOBE_DIFFUSE else vec3(0.0, 0.0, 0.0)
+                specular += contrib * first_bounce_invpdf if first_bounce_lobe_id == LOBE_SPEC_REFL else vec3(0.0, 0.0, 0.0)
+
+                diffuse += first_vertex_NEE_diffuse
+                specular += first_vertex_NEE_specular
+            else: # Write diffuse and specular integrands of chosen input sample to their buffers
+                if not chose_NEE_sample:
+                    diffuse  += input_sample_reservoir.z.F if first_bounce_lobe_id == LOBE_DIFFUSE else vec3(0.0, 0.0, 0.0)
+                    specular += input_sample_reservoir.z.F if first_bounce_lobe_id == LOBE_SPEC_REFL else vec3(0.0, 0.0, 0.0)
+                else:
+                    diffuse += first_vertex_NEE_diffuse
+                    specular += first_vertex_NEE_specular
+
+            if ti.static(not USE_RESTIR_PT):
+                diffuse /= max(primary_albedo, 1e-2) # de-modulate albedo (we do it later when ReSTIR is on)
+            self.color_buffer[u, v] = ti.cast(diffuse, ti.f16)
+            self.color_buffer_specular[u, v] = ti.cast(specular, ti.f16)
 
     @ti.kernel
     def _render_to_image(self, img : ti.types.rw_texture(num_dimensions=2, num_channels=4, channel_format=ti.f32, lod=0), samples: ti.i32):
@@ -614,7 +638,7 @@ class Renderer:
         # primary dst vertex weights
         dst_tang, dst_bitang = make_orthonormal_basis(dst_normal)
         view = (self.camera_pos[None] - dst_pos).normalized()
-        primary_brdf = self.bsdf.disney_evaluate_lobewise(dst_material, \
+        primary_brdf_d, primary_brdf_s = self.bsdf.disney_evaluate_lobewise_split(dst_material, \
                                                           view, \
                                                           dst_normal, \
                                                           dir_to_rc_vertex, \
@@ -622,7 +646,8 @@ class Renderer:
                                                           src_reservoir.z.lobes % 10) # Evaluating the source reservoir's
                                                                                       # BSDF lobe since that is part of
                                                                                       # the source sample.
-        primary_brdf *= saturate(dst_normal.dot(dir_to_rc_vertex))
+        primary_brdf_d *= saturate(dst_normal.dot(dir_to_rc_vertex))
+        primary_brdf_s *= saturate(dst_normal.dot(dir_to_rc_vertex))
         # dst_primary_pdf = self.bsdf.pdf_disney_lobewise(dst_material, \
         #                                        view, \
         #                                        dst_normal, \
@@ -641,16 +666,16 @@ class Renderer:
         
         # compute shifted integrand
         contrib = vec3(0., 0., 0.)
-        if not rc_is_escape_vertex and not rc_is_last_vertex:
+        if not rc_is_escape_vertex and not rc_is_last_vertex: # rc bounce incident light
             # RC BSDF MIS weight
             rc_bsdf_sample_light_pdf = cone_sample_pdf(self.light_cone_cos_theta_max[None], \
                                                     self.light_direction[None].dot(src_reservoir.z.rc_incident_dir))
             rc_bsdf_mis_weight = self.power_heuristic(dst_rc_pdf, rc_bsdf_sample_light_pdf * (1.0 if rc_is_NEE_visible else 0.0))
 
-            contrib += firefly_filter(rc_bsdf_mis_weight * rc_brdf / dst_rc_pdf * src_reservoir.z.rc_incident_L) # rc bounce
-        if rc_is_escape_vertex:
-            contrib += firefly_filter(src_reservoir.z.rc_incident_L) # sky emission
-        if ti.static(use_directional_light):
+            contrib += firefly_filter(rc_bsdf_mis_weight * rc_brdf / dst_rc_pdf * src_reservoir.z.rc_incident_L)
+        if rc_is_escape_vertex: # sky emission
+            contrib += firefly_filter(src_reservoir.z.rc_incident_L)
+        if ti.static(use_directional_light): # NEE at rc vertex
             if rc_is_NEE_visible and not rc_is_escape_vertex:
                 rc_light_sample_bsdf_pdf = self.bsdf.pdf_disney(rc_mat, \
                                                                -dir_to_rc_vertex, 
@@ -659,10 +684,11 @@ class Renderer:
                                                                 rc_tang, rc_bitang)
                 rc_light_sample_light_pdf = cone_sample_pdf(self.light_cone_cos_theta_max[None], 1.0)
                 rc_light_sample_mis_weight = self.power_heuristic(rc_light_sample_light_pdf, rc_light_sample_bsdf_pdf)
-                contrib += firefly_filter(rc_light_sample_mis_weight * rc_nee_brdf * self.light_weight * self.light_color[None]) # NEE at rc vertex
+                contrib += firefly_filter(rc_light_sample_mis_weight * rc_nee_brdf * self.light_weight * self.light_color[None]) 
         contrib += vec3(0., 0., 0.) if rc_mat_id != 2 else rc_mat.base_col # emission at rc vertex
 
-        contrib *= primary_brdf
+        diffuse  = primary_brdf_d * contrib
+        specular = primary_brdf_s * contrib
 
         # compute jacobian
         jacobian = 1.0 # limit case of escape vertices converges to one
@@ -679,7 +705,8 @@ class Renderer:
         if jacobian < 0.0 or isnan(jacobian) or isinf(jacobian): 
             jacobian = 0.0
             if max(jacobian, 1.0 / jacobian) > 11.0: # 11 rejection threshold
-                contrib = vec3(0.0, 0.0, 0.0)
+                diffuse  = vec3(0.0, 0.0, 0.0)
+                specular = vec3(0.0, 0.0, 0.0)
         
         # rc_dist = 1.0
         # if not rc_is_escape_vertex:
@@ -688,7 +715,7 @@ class Renderer:
         #     contrib = vec3(0., 0., 0.)
 
 
-        return contrib, jacobian*passed_checks
+        return diffuse, specular, jacobian*passed_checks
 
 
     @ti.kernel
@@ -748,6 +775,9 @@ class Renderer:
             # Using the generalized form from the ReSTIR PT paper.
             canonical_mis_weight = 1.0
 
+            chosen_F_d = vec3(0., 0., 0.)
+            chosen_F_s = vec3(0., 0., 0.)
+
             for i in range(max_taps):
                 # neighbor_index = ti.cast(start_index + i, ti.u32) & offset_mask
                 # offset = ti.cast(self.reuse_offsets[neighbor_index] * max_radius, ti.i32)
@@ -783,28 +813,28 @@ class Renderer:
                 neighbour_mat, neighbour_mat_id = decode_material(self.mats.mat_list, self.gbuff_mat_id[tap_coord.x, tap_coord.y])
 
                 # Center reservoir's sample shifted into neighbour pixel's domain
-                center_integrand, c_jacobian = self.shift(neighbour_x1, neighbour_n1, neighbour_mat, \
+                center_integrand_d, center_integrand_s, c_jacobian = self.shift(neighbour_x1, neighbour_n1, neighbour_mat, \
                                                           center_x1   , center_n1   , center_mat, \
                                                           center_reservoir)
                 
                 # Neighbour reservoir's sample shifted into center pixel's domain
-                shifted_integrand, jacobian = self.shift(center_x1   , center_n1   , center_mat, \
+                shifted_integrand_d, shifted_integrand_s, jacobian = self.shift(center_x1   , center_n1   , center_mat, \
                                                          neighbour_x1, neighbour_n1, neighbour_mat, \
                                                          neighbour_reservoir)
                 
                 # Update canonical sample's MIS weight
-                center_p_hat = luminance(center_integrand) * c_jacobian
+                center_p_hat = luminance(center_integrand_d + center_integrand_s) * c_jacobian
                 canonical_weight = center_p_hat * neighbour_reservoir.M
                 canonical_weight /= center_p_hat * neighbour_reservoir.M + luminance(center_reservoir.z.F) * center_reservoir.M / ti.cast(max_taps, ti.f32)
                 canonical_mis_weight += 1 - canonical_weight
 
-                p_hat = luminance(shifted_integrand)
+                p_hat = luminance(shifted_integrand_d + shifted_integrand_s)
 
                 # if jacobian < 1e-3: 
                 #     continue
 
                 # neighbour sample's MIS weight
-                p_hat_from_neighbour = luminance(shifted_integrand) / jacobian
+                p_hat_from_neighbour = p_hat / jacobian
 
                 neighbour_mis_weight = p_hat_from_neighbour * neighbour_reservoir.M
                 neighbour_mis_weight /= p_hat_from_neighbour * neighbour_reservoir.M + p_hat * center_reservoir.M / ti.cast(max_taps, ti.f32)
@@ -812,14 +842,18 @@ class Renderer:
                     neighbour_mis_weight = 0.0
                 
                 # Update neighbour reservoir sample to be the shifted one
-                neighbour_reservoir.z.F = shifted_integrand
+                neighbour_reservoir.z.F = shifted_integrand_d + shifted_integrand_s
                 # neighbour_reservoir.z.lobes = neighbour_reservoir.z.lobes // 10 + center_reservoir.z.lobes % 10
 
                 selected = output_reservoir.merge(neighbour_reservoir, neighbour_reservoir.weight * p_hat * jacobian * neighbour_mis_weight)
                 
+                if selected:
+                    chosen_F_d = shifted_integrand_d
+                    chosen_F_s = shifted_integrand_s
+
                 valid_samples += 1
 
-            # Shade RIS pass chosen sample (if this RIS sample is occluded, we will use canonical sample)
+            # Validate visibility for RIS pass chosen sample (if this RIS sample is occluded, use canonical sample)
             force_add_canonical = False
             dir_to_rc_vertex = output_reservoir.z.rc_pos if is_vec_zero(output_reservoir.z.rc_normal) else (output_reservoir.z.rc_pos - center_x1).normalized()
             dist, _, _, hit_light_, iters, smat = self.next_hit(center_x1 + center_n1*0.007*center_dist, dir_to_rc_vertex, inf, colors, shadow_ray=True)
@@ -833,13 +867,19 @@ class Renderer:
             center_p_hat = luminance(center_reservoir.z.F)
             selected = output_reservoir.merge(center_reservoir, center_reservoir.weight * center_p_hat * canonical_mis_weight, force_add_canonical)
 
+            if selected:
+                chosen_F_d = self.color_buffer[u, v] # diffuse and specular components of canonical sample integrand are stored here
+                chosen_F_s = self.color_buffer_specular[u, v]
+
             output_reservoir.finalize_without_M()
             output_reservoir.weight /= (valid_samples + 1)
 
 
             if pass_id == pass_total - 1:
                 emission = center_mat.base_col if center_mat_id == 2 else vec3(0.0, 0.0, 0.0)
-                self.color_buffer[u, v] = ti.cast(output_reservoir.z.F * clamp(output_reservoir.weight, 0.0, 50.0) + emission, ti.f16)
+                chosen_F_d /= max(center_mat.base_col, 1e-2) # de-modulate albedo
+                self.color_buffer[u, v] = ti.cast(chosen_F_d * clamp(output_reservoir.weight, 0.0, 50.0) + emission, ti.f16)
+                self.color_buffer_specular[u, v] = ti.cast(chosen_F_s * clamp(output_reservoir.weight, 0.0, 50.0), ti.f16)
 
             output_reservoir.update_cached_jacobian_term(center_x1)
             self.spatial_reservoirs[u, v, (pass_id + 1) % 2] = output_reservoir.encode()
@@ -847,7 +887,6 @@ class Renderer:
     @ti.func
     def reproject(self, world_pos):
         pos = ti.Vector([world_pos.x, world_pos.y, world_pos.z, 1.0])
-        # pos.xyz += self.camera_pos[None] - self.prev_camera_pos[None]
         pos = self.prev_view_mat[None] @ pos
         pos = self.prev_proj_mat[None] @ pos
         pos.xyz /= pos.w
@@ -940,8 +979,11 @@ class Renderer:
             else:
                 history = ti.Vector([current.x, current.y, current.z, 1.0])
 
+            # center material info
+            center_mat, center_mat_id = decode_material(self.mats.mat_list, self.gbuff_mat_id[u, v])
+
             self.history_buffer[u, v, 1] = ti.cast(history, ti.f16)
-            self.color_buffer[u, v] = ti.cast(history.xyz, ti.f16)
+            self.color_buffer[u, v] = ti.cast(history.xyz * center_mat.base_col, ti.f16)
 
         ti.loop_config(block_dim=128)
         for u, v in self.color_buffer:

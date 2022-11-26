@@ -12,6 +12,13 @@ from taichi.math import (mix, reflect, refract)
 #   - https://blog.selfshadow.com/publications/s2015-shading-course/burley/s2015_pbs_disney_bsdf_notes.pdf
 #   - https://github.com/wdas/brdf/blob/main/src/brdfs/disney.brdf
 
+LOBE_DIFFUSE = 0
+LOBE_SPEC_REFL = 1
+LOBE_CLEARC = 2
+LOBE_SPEC_TRANS_REFL = 3
+LOBE_SPEC_TRANS = 4
+LOBE_ALL = 9
+
 @ti.data_oriented
 class DisneyBSDF:
     def __init__(self) -> None:
@@ -129,11 +136,12 @@ class DisneyBSDF:
 
 
     @ti.func
-    def disney_evaluate(self, mat, v, n, l, tang, bitang):
+    def disney_evaluate_split(self, mat, v, n, l, tang, bitang):
         n_dot_l = n.dot(l)
         n_dot_v = (n.dot(v))
 
-        bsdf = vec3([0.0, 0.0, 0.0])
+        bsdf_diffuse = vec3([0.0, 0.0, 0.0])
+        bsdf_spec = vec3([0.0, 0.0, 0.0])
 
         if n_dot_l > 0 and n_dot_v > 0:
 
@@ -152,16 +160,21 @@ class DisneyBSDF:
             v_dot_x = (v.dot(tang))
             v_dot_y = (v.dot(bitang))
 
-            bsdf += self.disney_diffuse(mat, n_dot_l, n_dot_v, l_dot_h) * (1.0 - mat.metallic)
-            bsdf += self.disney_specular(mat, \
+            bsdf_diffuse += self.disney_diffuse(mat, n_dot_l, n_dot_v, l_dot_h) * (1.0 - mat.metallic)
+            bsdf_spec += self.disney_specular(mat, \
                             n_dot_l, n_dot_v, \
                             l_dot_h, n_dot_h, \
                             h_dot_x, h_dot_y, \
                             l_dot_x, l_dot_y, \
                             v_dot_x, v_dot_y, \
                             tang, bitang)
-            bsdf += self.disney_clearcoat(mat, n_dot_l, n_dot_v, n_dot_h, l_dot_h)
-        return bsdf
+            bsdf_spec += self.disney_clearcoat(mat, n_dot_l, n_dot_v, n_dot_h, l_dot_h)
+        return bsdf_diffuse, bsdf_spec
+
+    @ti.func
+    def disney_evaluate(self, mat, v, n, l, tang, bitang):
+        bsdf_d, bsdf_s = self.disney_evaluate_split(mat, v, n, l, tang, bitang)
+        return bsdf_d + bsdf_s
 
     @ti.func
     def pdf_diffuse(self, mat, n, l):
@@ -291,11 +304,12 @@ class DisneyBSDF:
         return sampled_dir, pdf
 
     @ti.func
-    def disney_evaluate_lobewise(self, mat, v, n, l, tang, bitang, lobe_id, specular_mult = 1.0):
+    def disney_evaluate_lobewise_split(self, mat, v, n, l, tang, bitang, lobe_id, specular_mult = 1.0):
         n_dot_l = n.dot(l)
         n_dot_v = (n.dot(v))
 
-        bsdf = vec3([0.0, 0.0, 0.0])
+        bsdf_d = vec3([0.0, 0.0, 0.0])
+        bsdf_s = vec3([0.0, 0.0, 0.0])
 
         if n_dot_l > 0 and n_dot_v > 0:
 
@@ -315,19 +329,24 @@ class DisneyBSDF:
             v_dot_y = (v.dot(bitang))
 
             # 9 means all lobes
-            if lobe_id == 0 or lobe_id == 9:
-                bsdf += self.disney_diffuse(mat, n_dot_l, n_dot_v, l_dot_h) * (1.0 - mat.metallic)
-            if lobe_id == 1 or lobe_id == 9:
-                bsdf += self.disney_specular(mat, \
+            if lobe_id == LOBE_DIFFUSE or lobe_id == LOBE_ALL:
+                bsdf_d += self.disney_diffuse(mat, n_dot_l, n_dot_v, l_dot_h) * (1.0 - mat.metallic)
+            if lobe_id == LOBE_SPEC_REFL or lobe_id == LOBE_ALL:
+                bsdf_s += self.disney_specular(mat, \
                                 n_dot_l, n_dot_v, \
                                 l_dot_h, n_dot_h, \
                                 h_dot_x, h_dot_y, \
                                 l_dot_x, l_dot_y, \
                                 v_dot_x, v_dot_y, \
                                 tang, bitang)*specular_mult
-            if lobe_id == 2 or lobe_id == 9:
-                bsdf += self.disney_clearcoat(mat, n_dot_l, n_dot_v, n_dot_h, l_dot_h)*specular_mult
-        return bsdf
+            if lobe_id == LOBE_CLEARC or lobe_id == LOBE_ALL:
+                bsdf_s += self.disney_clearcoat(mat, n_dot_l, n_dot_v, n_dot_h, l_dot_h)*specular_mult
+        return bsdf_d, bsdf_s
+
+    @ti.func
+    def disney_evaluate_lobewise(self, mat, v, n, l, tang, bitang, lobe_id, specular_mult = 1.0):
+        bsdf_d, bsdf_s = self.disney_evaluate_lobewise_split(mat, v, n, l, tang, bitang, lobe_id, specular_mult)
+        return bsdf_d + bsdf_s
 
     @ti.func
     def disney_get_lobe_probabilities(self, mat):
@@ -349,9 +368,9 @@ class DisneyBSDF:
         diffuse_w, specular_w, clearcoat_w = self.disney_get_lobe_probabilities(mat)
 
         pdf = 1.0
-        if(lobe_id == 0):
+        if(lobe_id == LOBE_DIFFUSE):
             pdf *= self.pdf_diffuse(mat, n, l) * diffuse_w
-        elif(lobe_id == 1):
+        elif(lobe_id == LOBE_SPEC_REFL):
             pdf *= self.pdf_specular(mat, v, n, l, tang, bitang) * specular_w
         else:
             pdf *= self.pdf_clearcoat(mat, v, n, l, tang, bitang) * clearcoat_w
@@ -387,13 +406,13 @@ class DisneyBSDF:
         chosen_lobe = -1
         if(rand <= diffuse_w):
             sample_dir, pdf = self.sample_diffuse(mat, n)
-            chosen_lobe = 0
+            chosen_lobe = LOBE_DIFFUSE
         elif(rand <= diffuse_w + specular_w):
             sample_dir, pdf = self.sample_specular(mat, v, n, tang, bitang)
-            chosen_lobe = 1
+            chosen_lobe = LOBE_SPEC_REFL
         else:
             sample_dir, pdf = self.sample_clearcoat(mat, v, n, tang, bitang)
-            chosen_lobe = 2
+            chosen_lobe = LOBE_CLEARC
 
         
         # compute brdf inputs
@@ -417,10 +436,10 @@ class DisneyBSDF:
 
         v_dot_h = (v.dot(h))
 
-        if(chosen_lobe == 0):
+        if(chosen_lobe == LOBE_DIFFUSE):
             brdf += self.disney_diffuse(mat, n_dot_l, n_dot_v, l_dot_h) * (1.0 - mat.metallic)
             pdf *= diffuse_w
-        elif(chosen_lobe == 1):
+        elif(chosen_lobe == LOBE_SPEC_REFL):
             brdf += self.disney_specular(mat, \
                                 n_dot_l, n_dot_v, \
                                 l_dot_h, n_dot_h, \
@@ -555,7 +574,7 @@ class DisneyBSDF:
         chosen_lobe = -1
         if(rand < clearcoat_w):
             sample_dir, pdf = self.sample_clearcoat(mat, v, n, tang, bitang)
-            chosen_lobe = 2
+            chosen_lobe = LOBE_CLEARC
         else:
             aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
 
@@ -584,7 +603,7 @@ class DisneyBSDF:
                 l_dot_h = abs(sampled_dir.dot(m))
 
                 pdf = F * G * l_dot_h * D / n_dot_l
-                chosen_lobe = 3
+                chosen_lobe = LOBE_SPEC_TRANS_REFL
             else:
                 sampled_dir = refract(-v, m, eta)
 
@@ -592,7 +611,7 @@ class DisneyBSDF:
                 l_dot_h = abs(sampled_dir.dot(m))
 
                 pdf = (1.0 - F) * G * l_dot_h * D / n_dot_l
-                chosen_lobe = 4
+                chosen_lobe = LOBE_SPEC_TRANS
         
         # compute brdf inputs
         n_dot_l = n.dot(sample_dir)
@@ -615,10 +634,10 @@ class DisneyBSDF:
 
         v_dot_h = (v.dot(h))
 
-        if(chosen_lobe == 2):
+        if(chosen_lobe == LOBE_CLEARC):
             bsdf += self.disney_clearcoat(mat, n_dot_l, n_dot_v, n_dot_h, l_dot_h)
             pdf *= clearcoat_w
-        elif(chosen_lobe == 3):
+        elif(chosen_lobe == LOBE_SPEC_TRANS_REFL):
             brdf += self.translucent_specular(mat, \
                                 n_dot_l, n_dot_v, \
                                 l_dot_h, n_dot_h, \
