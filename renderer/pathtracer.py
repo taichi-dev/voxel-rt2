@@ -34,11 +34,18 @@ class Renderer:
         self.current_spp = 0
         self.current_frame = 0
 
-        self.color_buffer = ti.Vector.field(3, dtype=ti.f16)
-        self.color_buffer_specular = ti.Vector.field(3, dtype=ti.f16)
+        # output buffers used for double-buffering in some places
+        self.output_diffuse = ti.Vector.field(3, dtype=ti.f32, shape=(self.image_res[0], self.image_res[1]))
+        self.output_specular = ti.Vector.field(3, dtype=ti.f32, shape=(self.image_res[0], self.image_res[1]))
+
+        self.color_buffer = ti.Vector.field(3, dtype=ti.f32)
+        self.color_buffer_specular = ti.Vector.field(3, dtype=ti.f32)
         self.history_buffer = ti.Vector.field(4, dtype=ti.f16)
         self.history_buffer_specular = ti.Vector.field(4, dtype=ti.f16)
+        self.history_buffer_specular_depth = ti.field(dtype=ti.f32)
         self.fov = ti.field(dtype=ti.f32, shape=())
+        self.color_min = ti.Vector.field(3, dtype=ti.f32)
+        self.color_max = ti.Vector.field(3, dtype=ti.f32)
 
         self.light_direction = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.light_cone_cos_theta_max = ti.field(dtype=ti.f32, shape=())
@@ -65,9 +72,13 @@ class Renderer:
         # each thread block will process 16x8 pixels in a batch instead of a 32 pixel row in a batch
         # Thus we pay less divergence penalty on hard paths (e.g. voxel edges)
         ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.color_buffer)
+
         ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.color_buffer_specular)
         ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ijk, (16, 8, 2)).place(self.history_buffer)
         ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ijk, (16, 8, 2)).place(self.history_buffer_specular)
+        ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ijk, (16, 8, 2)).place(self.history_buffer_specular_depth)
+        ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.color_min)
+        ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.color_max)
 
         self.voxel_grid_res = 128
         self.world = VoxelWorld(dx, self.voxel_grid_res, voxel_edges)
@@ -95,21 +106,23 @@ class Renderer:
 
         # Reservoir storage
         self.spatial_reservoirs = StorageReservoir.field()
-        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ijk, (32, 32, 2)).place(self.spatial_reservoirs)
+        ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ijk, (16, 8, 2)).place(self.spatial_reservoirs)
 
         # Gbuffer
         self.gbuff_mat_id = ti.field(dtype=ti.u32)
         self.gbuff_normals = ti.Vector.field(2, dtype=ti.f16)
         self.gbuff_depth = ti.field(dtype=ti.f32)
+        self.gbuff_depth_reflection = ti.field(dtype=ti.f32)
         self.gbuff_position = ti.Vector.field(3, dtype=ti.f32)
         self.gbuff_prev_depth = ti.field(dtype=ti.f32)
         self.gbuff_prev_normals = ti.Vector.field(2, dtype=ti.f16)
-        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ij, (32, 32)).place(self.gbuff_mat_id)
-        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ij, (32, 32)).place(self.gbuff_normals)
-        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ij, (32, 32)).place(self.gbuff_position)
-        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ij, (32, 32)).place(self.gbuff_prev_depth)
-        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ij, (32, 32)).place(self.gbuff_prev_normals)
-        ti.root.dense(ti.ij, (image_res[0] // 32, image_res[1] // 32)).dense(ti.ij, (32, 32)).place(self.gbuff_depth)
+        ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.gbuff_mat_id)
+        ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.gbuff_normals)
+        ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.gbuff_position)
+        ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.gbuff_prev_depth)
+        ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.gbuff_prev_normals)
+        ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.gbuff_depth)
+        ti.root.dense(ti.ij, (image_res[0] // 16, image_res[1] // 8)).dense(ti.ij, (16, 8)).place(self.gbuff_depth_reflection)
         # self.gbuff_mat_id = ti.field(dtype=ti.u32, shape=(image_res[0], image_res[1]))
         # self.gbuff_normals = ti.Vector.field(2, dtype=ti.f16, shape=(image_res[0], image_res[1]))
         # self.gbuff_position = ti.Vector.field(3, dtype=ti.f32, shape=(image_res[0], image_res[1])) 
@@ -332,6 +345,7 @@ class Renderer:
             first_bounce_dir = ti.Vector([0.0, 0.0, 0.0]) 
             first_light_sample_bsdf_pdf = 1.0 # first vertex 
             first_light_sample_dir = ti.Vector([0.0, 0.0, 0.0])
+            first_bounce_reflection_dist = 0.0
             rc_bounce_lobe_id = 0
 
             is_sky_ray = False
@@ -355,6 +369,8 @@ class Renderer:
                     input_sample_reservoir.z.rc_normal = normal
                     input_sample_reservoir.z.rc_mat_info = encode_material(mat_id, albedo)
                     first_bounce_dir = d
+                    if first_bounce_lobe_id != LOBE_DIFFUSE:
+                        first_bounce_reflection_dist += closest
                 elif(depth == 2):
                     input_sample_reservoir.z.rc_incident_dir = d
 
@@ -475,6 +491,12 @@ class Renderer:
             self.gbuff_position[u, v] = primary_pos
             self.gbuff_mat_id[u, v] = primary_mat_info
 
+            # Build virtual reflection point and depth
+            primary_dir = (primary_pos - self.camera_pos[None]).normalized()
+            virtual_point = primary_pos + primary_dir * first_bounce_reflection_dist
+            refl_depth = view_to_screen(world_to_view(virtual_point.xyz, self.view_mat[None]), self.proj_mat[None]).z
+            self.gbuff_depth_reflection[u, v] = linearize_depth(refl_depth, self.proj_mat_inv[None]) if first_bounce_reflection_dist != 0.0 else 0.0
+
             # Populate reservoir fields with BSDF sample
             input_sample_reservoir.z.F = contrib
             input_sample_reservoir.z.lobes = rc_bounce_lobe_id*10 + first_bounce_lobe_id
@@ -521,7 +543,7 @@ class Renderer:
                                         rc_incident_L=self.light_weight * self.light_color[None], \
                                         rc_NEE_dir=vec3(0,0,0), \
                                         rc_mat_info=0, \
-                                        cached_jacobian_term=1.0, lobes = 99) # 9 indicates all lobes will be used
+                                        cached_jacobian_term=1.0, lobes = LOBE_ALL*10 + LOBE_ALL)
 
                     chose_NEE_sample = input_sample_reservoir.input_sample(light_sample_weight, light_sample)
                 else:
@@ -555,8 +577,8 @@ class Renderer:
 
             if ti.static(not USE_RESTIR_PT):
                 diffuse /= max(primary_albedo, 1e-2) # de-modulate albedo (we do it later when ReSTIR is on)
-            self.color_buffer[u, v] = ti.cast(diffuse, ti.f16)
-            self.color_buffer_specular[u, v] = ti.cast(specular, ti.f16)
+            self.color_buffer[u, v] = ti.cast(diffuse, ti.f32)
+            self.color_buffer_specular[u, v] = ti.cast(specular, ti.f32)
 
     @ti.kernel
     def _render_to_image(self, img : ti.types.rw_texture(num_dimensions=2, num_channels=4, channel_format=ti.f32, lod=0), samples: ti.i32):
@@ -722,7 +744,7 @@ class Renderer:
     def spatial_GRIS(self, pass_id : ti.i32, max_radius : ti.f32, max_taps : ti.i32, pass_total : ti.i32, colors: ti.types.texture(3)):
 
         # Render
-        ti.loop_config(block_dim=256)
+        ti.loop_config(block_dim=128)
         for u, v in self.gbuff_position:
 
             texcoord = (ti.Vector([u, v]) + 0.5) * self.inv_image_res
@@ -853,6 +875,7 @@ class Renderer:
 
                 valid_samples += 1
 
+
             # Validate visibility for RIS pass chosen sample (if this RIS sample is occluded, use canonical sample)
             force_add_canonical = False
             dir_to_rc_vertex = output_reservoir.z.rc_pos if is_vec_zero(output_reservoir.z.rc_normal) else (output_reservoir.z.rc_pos - center_x1).normalized()
@@ -878,11 +901,13 @@ class Renderer:
             if pass_id == pass_total - 1:
                 emission = center_mat.base_col if center_mat_id == 2 else vec3(0.0, 0.0, 0.0)
                 chosen_F_d /= max(center_mat.base_col, 1e-2) # de-modulate albedo
-                self.color_buffer[u, v] = ti.cast(chosen_F_d * clamp(output_reservoir.weight, 0.0, 50.0) + emission, ti.f16)
-                self.color_buffer_specular[u, v] = ti.cast(chosen_F_s * clamp(output_reservoir.weight, 0.0, 50.0), ti.f16)
+                self.color_buffer[u, v] = ti.cast(chosen_F_d * clamp(output_reservoir.weight, 0.0, 50.0) + emission, ti.f32)
+                self.color_buffer_specular[u, v] = ti.cast(chosen_F_s * clamp(output_reservoir.weight, 0.0, 50.0), ti.f32)
 
             output_reservoir.update_cached_jacobian_term(center_x1)
             self.spatial_reservoirs[u, v, (pass_id + 1) % 2] = output_reservoir.encode()
+
+            
 
     @ti.func
     def reproject(self, world_pos):
@@ -910,6 +935,33 @@ class Renderer:
     @ti.func
     def catmullrom2(self, v):
         return self.catmullrom(v.x) * self.catmullrom(v.y)
+
+    @ti.kernel
+    def temporal_filter_prepass(self):
+        
+        # Filter reflection depth buffer
+
+        for u, v in self.color_buffer:
+
+            ires = ti.cast(ti.Vector([self.image_res[0], self.image_res[1]]), ti.i32)
+
+            refl_depth_sum = 0.0
+            valid_reflection_depths = 0.0
+
+            for x in range(-1, 3):
+                for y in range(-1, 3):
+                    tap_coord = ti.cast(ti.Vector([u, v]) + ti.Vector([x, y]), ti.i32)
+
+                    if any(clamp(tap_coord, ti.Vector([0, 0]), ires - 1) != tap_coord):
+                        continue
+                    
+                    refl_depth = self.gbuff_depth_reflection[tap_coord.x, tap_coord.y]
+                    if refl_depth != 0.0:
+                        valid_reflection_depths += 1.0
+                        refl_depth_sum += refl_depth
+
+
+            self.gbuff_depth_reflection[u, v] = refl_depth_sum / valid_reflection_depths if valid_reflection_depths > 0.01 else 0.0
 
     @ti.func
     def history_filter(self, uv, center_depth, center_normal):
@@ -950,10 +1002,61 @@ class Renderer:
 
         return weight_sum, max(clamp(col_sum, col_min, col_max), ti.Vector([0., 0., 0., 1.])) # anti-ringing
 
+    @ti.func
+    def history_filter_specular(self, uv, center_depth, center_normal):
+        ires = ti.cast(ti.Vector([self.image_res[0], self.image_res[1]]), ti.i32)
+
+        fcoord = ti.Vector([uv.x * self.image_res[0] - 0.5, uv.y * self.image_res[1] - 0.5])
+        icoord = ti.cast(fcoord, ti.i32)
+        f = fract(fcoord)
+
+        col_sum = ti.Vector([0.0, 0.0, 0.0, 0.0])
+        col_max = ti.Vector([0.0, 0.0, 0.0, 0.0])
+        col_min = ti.Vector([999999.0, 999999.0, 999999.0, 999999.0])
+
+        depth_sum = 0.0
+        depth_max = 0.0
+        depth_min = 999999.0
+
+        weight_sum = 0.0
+        for x in range(-1, 3):
+            for y in range(-1, 3):
+                tap_coord = icoord + ti.cast(ti.Vector([x, y]), ti.i32)
+
+                if any(clamp(tap_coord, ti.Vector([0, 0]), ires - 1) != tap_coord):
+                    continue
+
+                w = self.catmullrom2(abs(ti.Vector([x, y]) - f))
+
+                # tap_depth = linearize_depth(self.gbuff_prev_depth[tap_coord.x, tap_coord.y], self.proj_mat_inv[None])
+                tap_normal = decode_unit_vector_3x16(self.gbuff_prev_normals[tap_coord.x, tap_coord.y])
+
+                # w *= 1.0 if abs(tap_depth - center_depth)/center_depth < 0.05 else 0.0
+                w *= 1.0 if center_normal.dot(tap_normal) > 0.642 else 0.0
+
+                col = self.history_buffer_specular[tap_coord.x, tap_coord.y, 0]
+                col_max = max(col_max, col)
+                col_min = min(col_min, col)
+
+                refl_depth = self.history_buffer_specular_depth[tap_coord.x, tap_coord.y, 0]
+                depth_min = min(depth_min, refl_depth)
+                depth_max = max(depth_max, refl_depth)
+
+                col_sum += col * w
+                depth_sum += refl_depth * w
+                weight_sum += w
+        
+        col_sum /= weight_sum
+        depth_sum /= weight_sum
+
+        return weight_sum, \
+               max(clamp(col_sum, col_min, col_max), ti.Vector([0., 0., 0., 1.])), \
+               clamp(depth_sum, depth_min, depth_max) # anti-ringing
+
     @ti.kernel
     def temporal_filter(self):
 
-        ti.loop_config(block_dim=128)
+        # ti.loop_config(block_dim=128)
         for u, v in self.color_buffer:
             texcoord = (ti.Vector([u, v]) + 0.5) * self.inv_image_res
             # center_x1 = self.gbuff_position[u, v]
@@ -984,15 +1087,60 @@ class Renderer:
 
             self.history_buffer[u, v, 1] = ti.cast(history, ti.f16)
             self.color_buffer[u, v] = ti.cast(history.xyz * center_mat.base_col, ti.f16)
+            
 
-        ti.loop_config(block_dim=128)
+    @ti.kernel
+    def temporal_filter_specular(self):
+
+        # ti.loop_config(block_dim=128)
+        for u, v in self.color_buffer:
+            texcoord = (ti.Vector([u, v]) + 0.5) * self.inv_image_res
+            # center_x1 = self.gbuff_position[u, v]
+            center_nonlinear_depth = self.gbuff_depth[u, v]
+            center_depth = linearize_depth(center_nonlinear_depth, self.proj_mat_inv[None])
+            center_n1 = decode_unit_vector_3x16(self.gbuff_normals[u, v])
+            center_x1 = view_to_world(screen_to_view(texcoord, center_nonlinear_depth, self.proj_mat_inv[None]), self.view_mat_inv[None])
+
+            center_refl_depth = self.gbuff_depth_reflection[u, v]
+            center_refl_nonlinear_depth = delinearize_depth(center_refl_depth, self.proj_mat[None])
+            center_refl_pos = view_to_world(screen_to_view(texcoord, center_refl_nonlinear_depth, self.proj_mat_inv[None]), self.view_mat_inv[None])
+
+            if is_vec_zero(center_x1):
+                continue
+
+            current = ti.cast(self.color_buffer_specular[u, v], ti.f32)
+
+            # reproject
+            reprojected_pos = self.reproject(center_refl_pos if center_refl_depth != 0.0 else center_x1)
+
+            # sample history
+            w_sum, history, refl_depth_history = self.history_filter_specular(reprojected_pos.xy, linearize_depth(reprojected_pos.z, self.proj_mat_inv[None]), center_n1)
+
+            # col_max = self.color_max[u, v]
+            # col_min = self.color_min[u, v]
+
+            if w_sum > 1e-3:
+                history.w = min(history.w + 1.0, 50.0)
+                history.xyz = mix(history.xyz, current, 1.0 / history.w)
+                refl_depth_history = mix(refl_depth_history, center_refl_depth, 1.0 / history.w)
+            else:
+                history = ti.Vector([current.x, current.y, current.z, 1.0])
+                refl_depth_history = center_refl_depth
+
+            # history.xyz = clamp(history.xyz, col_min, col_max)
+
+            self.history_buffer_specular[u, v, 1] = ti.cast(history, ti.f16)
+            self.history_buffer_specular_depth[u, v, 1] = refl_depth_history
+            self.color_buffer[u, v] += ti.cast(history.xyz, ti.f16)
+
+        # ti.loop_config(block_dim=128)
         for u, v in self.color_buffer:
             self.history_buffer[u, v, 0] = self.history_buffer[u, v, 1]
             self.gbuff_prev_depth[u, v] = self.gbuff_depth[u, v]
             self.gbuff_prev_normals[u, v] = self.gbuff_normals[u, v]
+            self.history_buffer_specular[u, v, 0] = self.history_buffer_specular[u, v, 1]
+            self.history_buffer_specular_depth[u, v, 0] = self.history_buffer_specular_depth[u, v, 1]
             
-
-
 
 
 
@@ -1002,10 +1150,12 @@ class Renderer:
     
     def accumulate(self):
         self.render(self.world.voxel_color_texture)
+        self.temporal_filter_prepass()
         if ti.static(USE_RESTIR_PT):
             self.spatial_GRIS(0, 16.0, 12, 1, self.world.voxel_color_texture)
             # self.spatial_GRIS(1, 16.0, 6, 2, self.world.voxel_color_texture)
         self.temporal_filter()
+        self.temporal_filter_specular()
         self.current_spp += 1
         self.current_frame += 1
 

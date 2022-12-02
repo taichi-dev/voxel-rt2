@@ -16,7 +16,7 @@ def initialize_voxels():
             scene.set_voxel(vec3(0, i, j), 1, vec3(0.9, 0.3, 0.3)) # left wall
             scene.set_voxel(vec3(n, i, j), 1, vec3(0.3, 0.9, 0.3)) # right wall
             scene.set_voxel(vec3(i, n, j), 11, vec3(1, 1, 1)) # ceiling
-            scene.set_voxel(vec3(i, 0, j), 11, vec3(0.0, 0.0, 0.0)) # floor
+            scene.set_voxel(vec3(i, 0, j), 50, vec3(1.0, 1.0, 1.0)) # floor
             scene.set_voxel(vec3(i, j, 0), 51, vec3(1, 1, 1)) # back wall
             # scene.set_voxel(vec3(i, j, n), 1, vec3(0.3, 0.3, 0.9)) # front wall
             # scene.set_voxel(vec3(i, j, 0), 51 if j < n/2 else 51, vec3(1, 1, 1))
