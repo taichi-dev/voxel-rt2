@@ -152,6 +152,11 @@ def np_rotate_matrix(axis, theta):
 def luminance(x):
     return ti.Vector([0.2125, 0.7154, 0.0721]).dot(x)
 
+@ti.func
+def smoothstep(edge0, edge1, x):
+    t = ti.math.clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
 # Uchimura 2017, "HDR theory and practice"
 # Math: https://www.desmos.com/calculator/gslcdxvipg
 # Source: https://www.slideshare.net/nikuque/hdr-theory-and-practicce-jp

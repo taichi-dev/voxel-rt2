@@ -34,14 +34,12 @@ class Renderer:
         self.current_spp = 0
         self.current_frame = 0
 
-        # output buffers used for double-buffering in some places
-        self.output_diffuse = ti.Vector.field(3, dtype=ti.f32, shape=(self.image_res[0], self.image_res[1]))
-        self.output_specular = ti.Vector.field(3, dtype=ti.f32, shape=(self.image_res[0], self.image_res[1]))
-
         self.color_buffer = ti.Vector.field(3, dtype=ti.f32)
         self.color_buffer_specular = ti.Vector.field(3, dtype=ti.f32)
-        self.history_buffer = ti.Vector.field(4, dtype=ti.f16)
-        self.history_buffer_specular = ti.Vector.field(4, dtype=ti.f16)
+        self.specular_mean = ti.Vector.field(3, dtype=ti.f32, shape=(self.image_res[0], self.image_res[1]))
+        self.specular_stdev = ti.Vector.field(3, dtype=ti.f32, shape=(self.image_res[0], self.image_res[1]))
+        self.history_buffer = ti.Vector.field(4, dtype=ti.f32)
+        self.history_buffer_specular = ti.Vector.field(4, dtype=ti.f32)
         self.history_buffer_specular_depth = ti.field(dtype=ti.f32)
         self.fov = ti.field(dtype=ti.f32, shape=())
         self.color_min = ti.Vector.field(3, dtype=ti.f32)
@@ -126,6 +124,9 @@ class Renderer:
         # self.gbuff_mat_id = ti.field(dtype=ti.u32, shape=(image_res[0], image_res[1]))
         # self.gbuff_normals = ti.Vector.field(2, dtype=ti.f16, shape=(image_res[0], image_res[1]))
         # self.gbuff_position = ti.Vector.field(3, dtype=ti.f32, shape=(image_res[0], image_res[1])) 
+
+        self.max_accum_frames = 1.0
+        self.camera_is_moving = False
 
     def set_directional_light(self, direction, light_cone_angle, light_color):
         self.light_direction[None] = ti.Vector(direction).normalized()
@@ -595,7 +596,9 @@ class Renderer:
 
     def reset_framebuffer(self):
         self.current_spp = 0
-        self.color_buffer.fill(0)
+        self.history_buffer.fill(ti.Vector([0., 0., 0., 0.]))
+        self.history_buffer_specular.fill(ti.Vector([0., 0., 0., 0.]))
+        self.history_buffer_specular_depth.fill(0.)
 
     # returns 1: computed integrand after it is shifted from src_reservoir into this reservoir's domain
     # returns 2: Jacobian determinant of this transformation
@@ -800,6 +803,11 @@ class Renderer:
             chosen_F_d = vec3(0., 0., 0.)
             chosen_F_s = vec3(0., 0., 0.)
 
+            # decide reuse radius and tap count
+            # tap_count = max_taps
+            # if 
+            # ti.cast(clamp(max_taps * , 1.0, max_taps) , ti.f32)
+
             for i in range(max_taps):
                 # neighbor_index = ti.cast(start_index + i, ti.u32) & offset_mask
                 # offset = ti.cast(self.reuse_offsets[neighbor_index] * max_radius, ti.i32)
@@ -879,7 +887,7 @@ class Renderer:
             # Validate visibility for RIS pass chosen sample (if this RIS sample is occluded, use canonical sample)
             force_add_canonical = False
             dir_to_rc_vertex = output_reservoir.z.rc_pos if is_vec_zero(output_reservoir.z.rc_normal) else (output_reservoir.z.rc_pos - center_x1).normalized()
-            dist, _, _, hit_light_, iters, smat = self.next_hit(center_x1 + center_n1*0.007*center_dist, dir_to_rc_vertex, inf, colors, shadow_ray=True)
+            dist, _, _, hit_light_, iters, smat = self.next_hit(center_x1 + center_n1*0.003*center_dist, dir_to_rc_vertex, inf, colors, shadow_ray=True)
             actual_dist = inf if is_vec_zero(output_reservoir.z.rc_normal) else distance(center_x1, output_reservoir.z.rc_pos)
 
             if dist < inf and abs(dist - actual_dist) > 0.1*actual_dist:
@@ -940,6 +948,7 @@ class Renderer:
     def temporal_filter_prepass(self):
         
         # Filter reflection depth buffer
+        # compute statistics for specular
 
         for u, v in self.color_buffer:
 
@@ -948,18 +957,35 @@ class Renderer:
             refl_depth_sum = 0.0
             valid_reflection_depths = 0.0
 
+            mean = vec3(0.0, 0.0, 0.0)
+            mean_sqr = vec3(0.0, 0.0, 0.0)
+            weight_sum = 0.0
+
             for x in range(-1, 3):
                 for y in range(-1, 3):
                     tap_coord = ti.cast(ti.Vector([u, v]) + ti.Vector([x, y]), ti.i32)
 
                     if any(clamp(tap_coord, ti.Vector([0, 0]), ires - 1) != tap_coord):
                         continue
+
+                    w = 1.0
+
+                    col = self.color_buffer_specular[tap_coord.x, tap_coord.y]
+
+                    mean += col * w
+                    mean_sqr += col * col * w
+                    weight_sum += w
                     
                     refl_depth = self.gbuff_depth_reflection[tap_coord.x, tap_coord.y]
                     if refl_depth != 0.0:
                         valid_reflection_depths += 1.0
                         refl_depth_sum += refl_depth
+            
+            mean /= weight_sum
+            mean_sqr /= weight_sum
 
+            self.specular_mean[u, v] = mean
+            self.specular_stdev[u, v] = ti.sqrt(max(mean_sqr - mean * mean, 0.0))
 
             self.gbuff_depth_reflection[u, v] = refl_depth_sum / valid_reflection_depths if valid_reflection_depths > 0.01 else 0.0
 
@@ -1077,7 +1103,7 @@ class Renderer:
             w_sum, history = self.history_filter(reprojected_pos.xy, linearize_depth(reprojected_pos.z, self.proj_mat_inv[None]), center_n1)
 
             if w_sum > 1e-3:
-                history.w = min(history.w + 1.0, 50.0)
+                history.w = min(history.w + 1.0, self.max_accum_frames)
                 history.xyz = mix(history.xyz, current, 1.0 / history.w)
             else:
                 history = ti.Vector([current.x, current.y, current.z, 1.0])
@@ -1085,9 +1111,18 @@ class Renderer:
             # center material info
             center_mat, center_mat_id = decode_material(self.mats.mat_list, self.gbuff_mat_id[u, v])
 
-            self.history_buffer[u, v, 1] = ti.cast(history, ti.f16)
+            self.history_buffer[u, v, 1] = ti.cast(history, ti.f32)
             self.color_buffer[u, v] = ti.cast(history.xyz * center_mat.base_col, ti.f16)
             
+
+    @ti.func
+    def history_clamp(self, current, history, mean, radius):
+        # idea from Kajiya (https://github.com/EmbarkStudios/kajiya/blob/main/assets/shaders/inc/soft_color_clamp.hlsl)
+        history_dist = abs(history - mean) / max(radius, abs(history * 0.1))
+
+        closest = clamp(history, current - radius, current + radius)
+        return mix(history, closest, smoothstep(1.0, 3.0, history_dist))
+
 
     @ti.kernel
     def temporal_filter_specular(self):
@@ -1116,20 +1151,23 @@ class Renderer:
             # sample history
             w_sum, history, refl_depth_history = self.history_filter_specular(reprojected_pos.xy, linearize_depth(reprojected_pos.z, self.proj_mat_inv[None]), center_n1)
 
-            # col_max = self.color_max[u, v]
-            # col_min = self.color_min[u, v]
+            mean = self.specular_mean[u, v]
+            stdev = self.specular_stdev[u, v]
+
+            if self.camera_is_moving:
+                history.xyz = self.history_clamp(current.xyz, history.xyz, mean, stdev * 2.0)
 
             if w_sum > 1e-3:
-                history.w = min(history.w + 1.0, 50.0)
+                history.w = min(history.w + 1.0, self.max_accum_frames)
                 history.xyz = mix(history.xyz, current, 1.0 / history.w)
                 refl_depth_history = mix(refl_depth_history, center_refl_depth, 1.0 / history.w)
             else:
                 history = ti.Vector([current.x, current.y, current.z, 1.0])
                 refl_depth_history = center_refl_depth
 
-            # history.xyz = clamp(history.xyz, col_min, col_max)
+            
 
-            self.history_buffer_specular[u, v, 1] = ti.cast(history, ti.f16)
+            self.history_buffer_specular[u, v, 1] = ti.cast(history, ti.f32)
             self.history_buffer_specular_depth[u, v, 1] = refl_depth_history
             self.color_buffer[u, v] += ti.cast(history.xyz, ti.f16)
 
@@ -1140,20 +1178,18 @@ class Renderer:
             self.gbuff_prev_normals[u, v] = self.gbuff_normals[u, v]
             self.history_buffer_specular[u, v, 0] = self.history_buffer_specular[u, v, 1]
             self.history_buffer_specular_depth[u, v, 0] = self.history_buffer_specular_depth[u, v, 1]
-            
+        
 
-
-
-
-
+    def set_max_samples(self, max_samples):
+        self.max_accum_frames = max_samples
 
     
     def accumulate(self):
         self.render(self.world.voxel_color_texture)
-        self.temporal_filter_prepass()
         if ti.static(USE_RESTIR_PT):
             self.spatial_GRIS(0, 16.0, 12, 1, self.world.voxel_color_texture)
             # self.spatial_GRIS(1, 16.0, 6, 2, self.world.voxel_color_texture)
+        self.temporal_filter_prepass()
         self.temporal_filter()
         self.temporal_filter_specular()
         self.current_spp += 1
