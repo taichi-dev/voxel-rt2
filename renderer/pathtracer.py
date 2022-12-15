@@ -33,6 +33,7 @@ class Renderer:
         self.vignette_center = [0.5, 0.5]
         self.current_spp = 0
         self.current_frame = 0
+        self.render_scale = ti.field(ti.f32, shape=())
 
         self.color_buffer = ti.Vector.field(3, dtype=ti.f32)
         self.color_buffer_specular = ti.Vector.field(3, dtype=ti.f32)
@@ -125,8 +126,11 @@ class Renderer:
         # self.gbuff_normals = ti.Vector.field(2, dtype=ti.f16, shape=(image_res[0], image_res[1]))
         # self.gbuff_position = ti.Vector.field(3, dtype=ti.f32, shape=(image_res[0], image_res[1])) 
 
-        self.max_accum_frames = 1.0
-        self.camera_is_moving = False
+        self.max_accum_frames = ti.field(dtype=ti.f32, shape=())
+        self.camera_is_moving = ti.field(dtype=ti.i32, shape=())
+
+        self.taa_jitter = ti.Vector.field(2, dtype=ti.f32, shape=())
+
 
     def set_directional_light(self, direction, light_cone_angle, light_color):
         self.light_direction[None] = ti.Vector(direction).normalized()
@@ -134,6 +138,12 @@ class Renderer:
         self.light_cone_cos_theta_max[None] = math.cos(light_cone_angle * 0.5)
         self.light_color[None] = light_color
         self.light_weight = 3.0 # light brightness multiplier times cone sampling pdf
+
+    def set_camera_is_moving(self, val):
+        self.camera_is_moving[None] = val
+
+    def set_render_scale(self, val):
+        self.render_scale[None] = val
 
     @ti.func
     def _sdf_march(self, p, d):
@@ -206,7 +216,7 @@ class Renderer:
         # Hit Data
         closest_hit_dist = max_dist
         normal = ti.Vector([0.0, 0.0, 0.0])
-        albedo = ti.Vector([0.0, 0.0, 0.0])
+        albedo = ti.Vector([1.0, 1.0, 1.0])
         hit_light = 0
         mat_id = 0
 
@@ -247,15 +257,21 @@ class Renderer:
     
     @ti.kernel
     def set_proj_mat(self, M: ti.types.ndarray()):
-        for i in ti.static(range(4)):  # a parallel for loop
+        self.taa_jitter[None] = ti.Vector([(ti.random()*2.0 - 1.0) * self.inv_image_res.x, \
+                                           (ti.random()*2.0 - 1.0) * self.inv_image_res.y])
+        for i in ti.static(range(4)):
             for j in ti.static(range(4)):
                 self.proj_mat[None][j, i] = M[i, j]
+                # if j == 0 and i == 2:
+                #     self.proj_mat[None][j, i] += self.taa_jitter[None].x
+                # if j == 1 and i == 2:
+                #     self.proj_mat[None][j, i] += self.taa_jitter[None].y
         self.proj_mat_inv[None] = inverse(self.proj_mat[None])
             
 
     @ti.kernel
     def set_view_mat(self, M: ti.types.ndarray()):
-        for i in ti.static(range(4)):  # a parallel for loop
+        for i in ti.static(range(4)):
             for j in ti.static(range(4)):
                 self.view_mat[None][j, i] = M[i, j]
         self.view_mat_inv[None] = inverse(self.view_mat[None])
@@ -265,6 +281,10 @@ class Renderer:
         self.prev_proj_mat[None] = self.proj_mat[None]
         self.prev_view_mat[None] = self.view_mat[None]
         self.prev_camera_pos[None] = self.camera_pos[None]
+
+    @ti.func
+    def is_outside_render_area(self, u, v):
+        return u > self.render_scale[None] * self.image_res[0] or v > self.render_scale[None] * self.image_res[1]
 
     @ti.func
     def get_cast_dir(self, u, v):
@@ -280,7 +300,9 @@ class Renderer:
         # dv = du.cross(d).normalized()
         # d = (d + fu * du + fv * dv).normalized()
         # return d
-        texcoord = (ti.Vector([u, v]) + 0.5) * self.inv_image_res
+        texcoord = (ti.Vector([u, v]) + 0.5) * self.inv_image_res / self.render_scale[None]
+        if self.camera_is_moving[None] == 0:
+            texcoord += self.taa_jitter[None]*0.5
         d = screen_to_view(texcoord, 1.0, self.proj_mat_inv[None]).normalized()
         d = view_to_world(d, self.view_mat_inv[None], 0.0)
         return d
@@ -329,6 +351,9 @@ class Renderer:
                 hit_background,
                 input_sample_reservoir
             ) = self.generate_new_sample(u, v)
+
+            if self.is_outside_render_area(u, v):
+                continue
 
             # values to populate gbuffer with
             primary_normal = ti.cast(ti.Vector([0.0, 0.0]), ti.f16)
@@ -577,7 +602,8 @@ class Renderer:
                     specular += first_vertex_NEE_specular
 
             if ti.static(not USE_RESTIR_PT):
-                diffuse /= max(primary_albedo, 1e-2) # de-modulate albedo (we do it later when ReSTIR is on)
+                if self.camera_is_moving[None] == 1:
+                    diffuse /= max(primary_albedo, 1e-2) # de-modulate albedo (we do it later when ReSTIR is on)
             self.color_buffer[u, v] = ti.cast(diffuse, ti.f32)
             self.color_buffer_specular[u, v] = ti.cast(specular, ti.f32)
 
@@ -590,8 +616,11 @@ class Renderer:
                 max(ti.math.distance(uv, self.vignette_center) -
                     self.vignette_radius, 0.0)
 
+            sample_coords = ti.cast(ti.Vector([i, j]) * self.render_scale[None], ti.i32)
+            hdr_color = self.color_buffer[sample_coords.x, sample_coords.y]
+
             ldr_color = ti.pow(
-                uchimura(self.color_buffer[i, j] * darken * self.exposure), 1.0 / 2.2)
+                uchimura(hdr_color * darken * self.exposure), 1.0 / 2.2)
             img.store(ti.Vector([i, j]), ti.Vector([ldr_color.r, ldr_color.g, ldr_color.b, 1.0]))
 
     def reset_framebuffer(self):
@@ -750,7 +779,10 @@ class Renderer:
         ti.loop_config(block_dim=128)
         for u, v in self.gbuff_position:
 
-            texcoord = (ti.Vector([u, v]) + 0.5) * self.inv_image_res
+            if self.is_outside_render_area(u, v):
+                continue
+
+            texcoord = (ti.Vector([u, v]) + 0.5) * self.inv_image_res / self.render_scale[None]
             
             start_index = ti.cast(ti.random() * max_taps, ti.u32)
             offset_mask = ti.cast(max_taps - 1, ti.u32)
@@ -822,7 +854,7 @@ class Renderer:
                     continue
                 
                 tap_coord = ti.Vector([u, v]) + offset
-                tap_texcoord = (tap_coord + 0.5) * self.inv_image_res
+                tap_texcoord = (tap_coord + 0.5) * self.inv_image_res / self.render_scale[None]
 
                 neighbour_n1 = decode_unit_vector_3x16(self.gbuff_normals[tap_coord.x, tap_coord.y])
                 neighbour_depth = self.gbuff_depth[tap_coord.x, tap_coord.y]
@@ -908,7 +940,8 @@ class Renderer:
 
             if pass_id == pass_total - 1:
                 emission = center_mat.base_col if center_mat_id == 2 else vec3(0.0, 0.0, 0.0)
-                chosen_F_d /= max(center_mat.base_col, 1e-2) # de-modulate albedo
+                if self.camera_is_moving[None] == 1:
+                    chosen_F_d /= max(center_mat.base_col, 1e-2) # de-modulate albedo
                 self.color_buffer[u, v] = ti.cast(chosen_F_d * clamp(output_reservoir.weight, 0.0, 50.0) + emission, ti.f32)
                 self.color_buffer_specular[u, v] = ti.cast(chosen_F_s * clamp(output_reservoir.weight, 0.0, 50.0), ti.f32)
 
@@ -952,7 +985,10 @@ class Renderer:
 
         for u, v in self.color_buffer:
 
-            ires = ti.cast(ti.Vector([self.image_res[0], self.image_res[1]]), ti.i32)
+            if self.is_outside_render_area(u, v):
+                continue
+
+            ires = ti.cast(ti.Vector([self.image_res[0], self.image_res[1]]) * self.render_scale[None], ti.i32)
 
             refl_depth_sum = 0.0
             valid_reflection_depths = 0.0
@@ -990,10 +1026,25 @@ class Renderer:
             self.gbuff_depth_reflection[u, v] = refl_depth_sum / valid_reflection_depths if valid_reflection_depths > 0.01 else 0.0
 
     @ti.func
-    def history_filter(self, uv, center_depth, center_normal):
-        ires = ti.cast(ti.Vector([self.image_res[0], self.image_res[1]]), ti.i32)
+    def bilinear_sample(self, buffer, uv):
+        ires = ti.cast(ti.Vector([self.image_res[0], self.image_res[1]]) * self.render_scale[None], ti.i32)
 
-        fcoord = ti.Vector([uv.x * self.image_res[0] - 0.5, uv.y * self.image_res[1] - 0.5])
+        fcoord = ti.Vector([uv.x * ires.x - 0.5, uv.y * ires.y - 0.5])
+        icoord = ti.cast(fcoord, ti.i32)
+        f = fract(fcoord)
+
+        bl = ti.cast(buffer[icoord.x, icoord.y], ti.f32)
+        br = ti.cast(buffer[icoord.x + 1, icoord.y], ti.f32)
+        tl = ti.cast(buffer[icoord.x, icoord.y + 1], ti.f32)
+        tr = ti.cast(buffer[icoord.x + 1, icoord.y + 1], ti.f32)
+
+        return mix(mix(bl, br, f.x), mix(tl, tr, f.x), f.y)
+
+    @ti.func
+    def history_filter(self, uv, center_depth, center_normal):
+        ires = ti.cast(ti.Vector([self.image_res[0], self.image_res[1]]) * self.render_scale[None], ti.i32)
+
+        fcoord = ti.Vector([uv.x * ires.x - 0.5, uv.y * ires.y - 0.5])
         icoord = ti.cast(fcoord, ti.i32)
         f = fract(fcoord)
 
@@ -1014,8 +1065,9 @@ class Renderer:
                 tap_depth = linearize_depth(self.gbuff_prev_depth[tap_coord.x, tap_coord.y], self.proj_mat_inv[None])
                 tap_normal = decode_unit_vector_3x16(self.gbuff_prev_normals[tap_coord.x, tap_coord.y])
 
-                w *= 1.0 if abs(tap_depth - center_depth)/center_depth < 0.05 else 0.0
-                w *= 1.0 if center_normal.dot(tap_normal) > 0.642 else 0.0
+                if self.camera_is_moving[None] == 1:
+                    w *= 1.0 if abs(tap_depth - center_depth)/center_depth < 0.05 else 0.0
+                    w *= 1.0 if center_normal.dot(tap_normal) > 0.642 else 0.0
 
                 col = self.history_buffer[tap_coord.x, tap_coord.y, 0]
                 col_max = max(col_max, col)
@@ -1030,9 +1082,9 @@ class Renderer:
 
     @ti.func
     def history_filter_specular(self, uv, center_depth, center_normal):
-        ires = ti.cast(ti.Vector([self.image_res[0], self.image_res[1]]), ti.i32)
+        ires = ti.cast(ti.Vector([self.image_res[0], self.image_res[1]]) * self.render_scale[None], ti.i32)
 
-        fcoord = ti.Vector([uv.x * self.image_res[0] - 0.5, uv.y * self.image_res[1] - 0.5])
+        fcoord = ti.Vector([uv.x * ires.x - 0.5, uv.y * ires.y - 0.5])
         icoord = ti.cast(fcoord, ti.i32)
         f = fract(fcoord)
 
@@ -1057,8 +1109,10 @@ class Renderer:
                 # tap_depth = linearize_depth(self.gbuff_prev_depth[tap_coord.x, tap_coord.y], self.proj_mat_inv[None])
                 tap_normal = decode_unit_vector_3x16(self.gbuff_prev_normals[tap_coord.x, tap_coord.y])
 
-                # w *= 1.0 if abs(tap_depth - center_depth)/center_depth < 0.05 else 0.0
-                w *= 1.0 if center_normal.dot(tap_normal) > 0.642 else 0.0
+                
+                if self.camera_is_moving[None] == 1:
+                    w *= 1.0 if center_normal.dot(tap_normal) > 0.642 else 0.0
+                    # w *= 1.0 if abs(tap_depth - center_depth)/center_depth < 0.05 else 0.0
 
                 col = self.history_buffer_specular[tap_coord.x, tap_coord.y, 0]
                 col_max = max(col_max, col)
@@ -1084,7 +1138,11 @@ class Renderer:
 
         # ti.loop_config(block_dim=128)
         for u, v in self.color_buffer:
-            texcoord = (ti.Vector([u, v]) + 0.5) * self.inv_image_res
+
+            if self.is_outside_render_area(u, v):
+                continue
+
+            texcoord = (ti.Vector([u, v]) + 0.5) * self.inv_image_res / self.render_scale[None]
             # center_x1 = self.gbuff_position[u, v]
             center_nonlinear_depth = self.gbuff_depth[u, v]
             center_depth = linearize_depth(center_nonlinear_depth, self.proj_mat_inv[None])
@@ -1094,7 +1152,7 @@ class Renderer:
             if is_vec_zero(center_x1):
                 continue
 
-            current = ti.cast(self.color_buffer[u, v], ti.f32)
+            current = self.bilinear_sample(self.color_buffer, texcoord)# ti.cast(self.color_buffer[u, v], ti.f32)
 
             # reproject
             reprojected_pos = self.reproject(center_x1)
@@ -1102,17 +1160,25 @@ class Renderer:
             # sample history
             w_sum, history = self.history_filter(reprojected_pos.xy, linearize_depth(reprojected_pos.z, self.proj_mat_inv[None]), center_n1)
 
+            if self.camera_is_moving[None] == 0:
+                w_sum = 1.0
+                history = self.history_buffer[u, v, 0]
+
             if w_sum > 1e-3:
-                history.w = min(history.w + 1.0, self.max_accum_frames)
+                history.w = min(history.w + 1.0, self.max_accum_frames[None])
                 history.xyz = mix(history.xyz, current, 1.0 / history.w)
             else:
                 history = ti.Vector([current.x, current.y, current.z, 1.0])
 
-            # center material info
+            # modulate albedo
             center_mat, center_mat_id = decode_material(self.mats.mat_list, self.gbuff_mat_id[u, v])
 
             self.history_buffer[u, v, 1] = ti.cast(history, ti.f32)
-            self.color_buffer[u, v] = ti.cast(history.xyz * center_mat.base_col, ti.f16)
+            
+            if self.camera_is_moving[None] == 1:
+                history.xyz *= center_mat.base_col
+
+            self.color_buffer[u, v] = ti.cast(history.xyz, ti.f16) 
             
 
     @ti.func
@@ -1129,7 +1195,11 @@ class Renderer:
 
         # ti.loop_config(block_dim=128)
         for u, v in self.color_buffer:
-            texcoord = (ti.Vector([u, v]) + 0.5) * self.inv_image_res
+
+            if self.is_outside_render_area(u, v):
+                continue
+
+            texcoord = (ti.Vector([u, v]) + 0.5) * self.inv_image_res / self.render_scale[None]
             # center_x1 = self.gbuff_position[u, v]
             center_nonlinear_depth = self.gbuff_depth[u, v]
             center_depth = linearize_depth(center_nonlinear_depth, self.proj_mat_inv[None])
@@ -1143,7 +1213,7 @@ class Renderer:
             if is_vec_zero(center_x1):
                 continue
 
-            current = ti.cast(self.color_buffer_specular[u, v], ti.f32)
+            current = self.bilinear_sample(self.color_buffer_specular, texcoord) # ti.cast(self.color_buffer_specular[u, v], ti.f32)
 
             # reproject
             reprojected_pos = self.reproject(center_refl_pos if center_refl_depth != 0.0 else center_x1)
@@ -1151,14 +1221,18 @@ class Renderer:
             # sample history
             w_sum, history, refl_depth_history = self.history_filter_specular(reprojected_pos.xy, linearize_depth(reprojected_pos.z, self.proj_mat_inv[None]), center_n1)
 
+            if self.camera_is_moving[None] == 0:
+                w_sum = 1.0
+                history = self.history_buffer_specular[u, v, 0]
+
             mean = self.specular_mean[u, v]
             stdev = self.specular_stdev[u, v]
 
-            if self.camera_is_moving:
-                history.xyz = self.history_clamp(current.xyz, history.xyz, mean, stdev * 2.0)
+            # if self.camera_is_moving[None] == 1:
+            #     history.xyz = self.history_clamp(current.xyz, history.xyz, mean, stdev * 2.0)
 
             if w_sum > 1e-3:
-                history.w = min(history.w + 1.0, self.max_accum_frames)
+                history.w = min(history.w + 1.0, self.max_accum_frames[None])
                 history.xyz = mix(history.xyz, current, 1.0 / history.w)
                 refl_depth_history = mix(refl_depth_history, center_refl_depth, 1.0 / history.w)
             else:
@@ -1181,7 +1255,7 @@ class Renderer:
         
 
     def set_max_samples(self, max_samples):
-        self.max_accum_frames = max_samples
+        self.max_accum_frames[None] = max_samples
 
     
     def accumulate(self):

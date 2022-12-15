@@ -181,21 +181,22 @@ class Scene:
         tcamera.z_near(0.01)
 
         camera_is_moving = False
-        max_samples = 999999999.0
         first_show = True
 
         # _ti_core.wait_for_debugger()
 
         while self.window.running:
             should_reset_framebuffer = False
-            max_samples = 999999999.0
+            self.renderer.set_max_samples(999999999.0)
+            self.renderer.set_render_scale(1.0)
 
             t = time.time()
             if self.camera.update_camera(t - last_t):
                 self.renderer.set_camera_pos(*self.camera.position)
                 look_at = self.camera.look_at
                 self.renderer.set_look_at(*look_at)
-                max_samples = 2.0
+                self.renderer.set_max_samples(50.0)
+                self.renderer.set_render_scale(0.5)
                 if not camera_is_moving:
                     camera_is_moving = True
                     should_reset_framebuffer = True
@@ -204,9 +205,9 @@ class Scene:
                     camera_is_moving = False
                     should_reset_framebuffer = True
             
-            self.renderer.camera_is_moving = camera_is_moving
+            self.renderer.set_camera_is_moving(camera_is_moving)
             last_t = t
-            self.renderer.set_max_samples(max_samples)
+            
 
             # update built-in camera
             tcamera.position(self.camera._camera_pos[0], self.camera._camera_pos[1], self.camera._camera_pos[2])
