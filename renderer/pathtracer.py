@@ -10,6 +10,7 @@ from renderer.raytracer import VoxelOctreeRaytracer
 from renderer.math_utils import *
 from renderer.space_transformations import *
 from renderer.reservoir import *
+from renderer.atmos import *
 
 USE_RESTIR_PT = True
 
@@ -130,6 +131,9 @@ class Renderer:
         self.camera_is_moving = ti.field(dtype=ti.i32, shape=())
 
         self.taa_jitter = ti.Vector.field(2, dtype=ti.f32, shape=())
+
+        self.atmos = Atmos()
+        self.use_physical_atmosphere = ti.field(dtype=ti.i32, shape=())
 
 
     def set_directional_light(self, direction, light_cone_angle, light_color):
@@ -311,7 +315,14 @@ class Renderer:
         self.world.update_data()
         self.voxel_raytracer._update_lods(
             self.world.voxel_material, ti.Vector(self.world.voxel_grid_offset))
-
+        
+        if self.use_physical_atmosphere[None] == 1:
+            print("Generating atmosphere LUT")
+            self.atmos.generate_transmittance_lut()
+            print("Computing atmosphere")
+            self.atmos.compute_skybox(self.light_direction[None], self.light_color[None] * self.light_weight, self.light_cone_cos_theta_max[None])
+            print("Done atmosphere")
+        
     @ti.func
     def generate_new_sample(self, u: ti.f32, v: ti.f32):
         d = self.get_cast_dir(u, v)
@@ -481,7 +492,11 @@ class Renderer:
                     if closest == inf:
                         # Hit background
                         hit_sun = 1.0 if self.light_direction[None].dot(d) >= self.light_cone_cos_theta_max[None] else 0.0
-                        sky_emission = firefly_filter(self.background_color[None] + self.light_weight * self.light_color[None] * hit_sun)
+                        sky_scattering = self.background_color[None]
+                        sky_transmittance = vec3(1., 1., 1.)
+                        if self.use_physical_atmosphere[None] == 1:
+                            sky_scattering, sky_transmittance = self.atmos.sample_skybox(d)
+                        sky_emission = firefly_filter(sky_scattering + sky_transmittance * self.light_weight * self.light_color[None] * hit_sun)
                         contrib += throughput * sky_emission
                         if depth == 0:
                             primary_pos = vec3(0.0, 0.0, 0.0)
@@ -562,11 +577,12 @@ class Renderer:
                     # Hopefully nobody wants voxel-rt2 to support other types of explicit light sources.
                     # If so, handling would be required for these types of light sources,
                     # probably storing light_pdf in the reservoir sample.
+                    sky_transmittance = self.atmos.sample_skybox_transmittance(first_light_sample_dir) if self.use_physical_atmosphere[None] == 1 else vec3(1., 1., 1.)
                     light_sample = Sample(F=first_vertex_NEE_diffuse + first_vertex_NEE_specular, \
                                         rc_pos=first_light_sample_dir, \
                                         rc_normal=vec3(0,0,0), \
                                         rc_incident_dir=vec3(0,0,0), \
-                                        rc_incident_L=self.light_weight * self.light_color[None], \
+                                        rc_incident_L=sky_transmittance * self.light_weight * self.light_color[None], \
                                         rc_NEE_dir=vec3(0,0,0), \
                                         rc_mat_info=0, \
                                         cached_jacobian_term=1.0, lobes = LOBE_ALL*10 + LOBE_ALL)
@@ -738,7 +754,9 @@ class Renderer:
                                                                 rc_tang, rc_bitang)
                 rc_light_sample_light_pdf = cone_sample_pdf(self.light_cone_cos_theta_max[None], 1.0)
                 rc_light_sample_mis_weight = self.power_heuristic(rc_light_sample_light_pdf, rc_light_sample_bsdf_pdf)
-                contrib += firefly_filter(rc_light_sample_mis_weight * rc_nee_brdf * self.light_weight * self.light_color[None]) 
+
+                sky_transmittance = self.atmos.sample_skybox_transmittance(src_reservoir.z.rc_NEE_dir) if self.use_physical_atmosphere[None] == 1 else vec3(1., 1., 1.)
+                contrib += firefly_filter(rc_light_sample_mis_weight * rc_nee_brdf * sky_transmittance * self.light_weight * self.light_color[None]) 
         contrib += vec3(0., 0., 0.) if rc_mat_id != 2 else rc_mat.base_col # emission at rc vertex
 
         diffuse  = primary_brdf_d * contrib

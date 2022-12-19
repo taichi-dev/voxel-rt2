@@ -158,6 +158,12 @@ class Scene:
     def set_background_color(self, color):
         self.renderer.background_color[None] = color
 
+    def set_use_physical_sky(self, use):
+        if use:
+            self.renderer.use_physical_atmosphere[None] = 1
+        else:
+            self.renderer.use_physical_atmosphere[None] = 0
+
     def finish(self):
         self.renderer.prepare_data()
         canvas = self.window.get_canvas()
