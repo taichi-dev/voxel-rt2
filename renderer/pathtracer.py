@@ -84,7 +84,7 @@ class Renderer:
         self.world = VoxelWorld(dx, self.voxel_grid_res, voxel_edges)
         self.voxel_raytracer = VoxelOctreeRaytracer(self.voxel_grid_res)
 
-        self._rendered_image = ti.Texture(ti.f32, 4, self.image_res)
+        self._rendered_image = ti.Texture(ti.Format.rgba32f, self.image_res)
         self.set_up(*up)
         self.set_fov(np.deg2rad(50.0))
 

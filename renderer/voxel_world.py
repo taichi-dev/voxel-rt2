@@ -18,7 +18,7 @@ class VoxelWorld:
         )
 
         shape = (self.voxel_grid_res, self.voxel_grid_res, self.voxel_grid_res)
-        self.voxel_color_texture = ti.Texture(ti.u8, 4, shape)
+        self.voxel_color_texture = ti.Texture(ti.Format.rgba8, shape)
 
         self.bbox = ti.Vector.field(3, dtype=ti.f32, shape=2)
         

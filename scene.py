@@ -23,6 +23,7 @@ Camera:
 MAT_LAMBERTIAN = 1
 MAT_LIGHT = 2
 
+from taichi.lang.impl import _ti_core
 
 class Camera:
     def __init__(self, window, up):
@@ -113,7 +114,7 @@ class Camera:
 
 class Scene:
     def __init__(self, voxel_edges=0.06, exposure=3):
-        ti.init(arch=ti.vulkan, offline_cache=True)
+        ti.init(arch=ti.vulkan, offline_cache=False)
         print(HELP_MSG)
         self.window = ti.ui.Window("Taichi Voxel Renderer", SCREEN_RES, vsync=False)
         self.camera = Camera(self.window, up=UP_DIR)
@@ -186,6 +187,9 @@ class Scene:
         tcamera.z_near(0.01)
 
         camera_is_moving = False
+        first_show = True
+
+        # _ti_core.wait_for_debugger()
 
         while self.window.running:
             should_reset_framebuffer = False
@@ -258,3 +262,7 @@ class Scene:
                         self.renderer.fov[None] = current_fov
 
             self.window.show()
+
+            if first_show:
+                ti.profiler.print_scoped_profiler_info()
+                first_show = False
