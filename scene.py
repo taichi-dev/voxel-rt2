@@ -114,7 +114,7 @@ class Camera:
 
 class Scene:
     def __init__(self, voxel_edges=0.06, exposure=3):
-        ti.init(arch=ti.vulkan, offline_cache=False)
+        ti.init(arch=ti.vulkan, offline_cache=True)
         print(HELP_MSG)
         self.window = ti.ui.Window("Taichi Voxel Renderer", SCREEN_RES, vsync=False)
         self.camera = Camera(self.window, up=UP_DIR)
@@ -264,5 +264,5 @@ class Scene:
             self.window.show()
 
             if first_show:
-                ti.profiler.print_scoped_profiler_info()
+                # ti.profiler.print_scoped_profiler_info()
                 first_show = False
