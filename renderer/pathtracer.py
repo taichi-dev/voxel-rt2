@@ -17,7 +17,7 @@ USE_RESTIR_PT = True
 MAX_RAY_DEPTH = 4
 use_directional_light = True
 
-RADIANCE_CLAMP = 3200.0
+RADIANCE_CLAMP = 300.0
 
 @ti.func
 def firefly_filter(v):
@@ -456,13 +456,13 @@ class Renderer:
                                     light_sample_mis_weight = self.power_heuristic(light_sample_light_pdf, light_sample_bsdf_pdf)
 
                                 light_bsdf_diffuse, light_bsdf_specular = self.bsdf.disney_evaluate_split(hit_mat, view, normal, light_dir, tang, bitang)
-                                NEE_contrib_diffuse = firefly_filter(light_sample_mis_weight * light_bsdf_diffuse * self.light_weight * self.light_color[None] * dot)
-                                NEE_contrib_specular = firefly_filter(light_sample_mis_weight * light_bsdf_specular * self.light_weight * self.light_color[None] * dot)
+                                NEE_contrib_diffuse = light_sample_mis_weight * light_bsdf_diffuse * self.light_weight * self.light_color[None] * dot
+                                NEE_contrib_specular = light_sample_mis_weight * light_bsdf_specular * self.light_weight * self.light_color[None] * dot
                                 if depth == 0:
-                                    first_vertex_NEE_diffuse  += throughput * NEE_contrib_diffuse
-                                    first_vertex_NEE_specular += throughput * NEE_contrib_specular
+                                    first_vertex_NEE_diffuse  += firefly_filter(throughput * NEE_contrib_diffuse)
+                                    first_vertex_NEE_specular += firefly_filter(throughput * NEE_contrib_specular)
                                 else:
-                                    contrib += throughput * (NEE_contrib_diffuse + NEE_contrib_specular)
+                                    contrib += firefly_filter(throughput * (NEE_contrib_diffuse + NEE_contrib_specular))
                                     
                                 if depth >= 2:
                                     input_sample_reservoir.z.rc_incident_L += throughput_after_rc * (NEE_contrib_diffuse + NEE_contrib_specular)
@@ -506,14 +506,14 @@ class Renderer:
                             input_sample_reservoir.z.rc_incident_L = sky_emission
                         
                         if depth >= 2:
-                            input_sample_reservoir.z.rc_incident_L += throughput_after_rc * sky_emission
+                            input_sample_reservoir.z.rc_incident_L += firefly_filter(throughput_after_rc * sky_emission)
                     else:
                         # hit light voxel, terminate tracing
                         if depth > 0:
                             contrib += throughput * albedo
 
                         if depth >= 2:
-                            input_sample_reservoir.z.rc_incident_L += throughput_after_rc * albedo
+                            input_sample_reservoir.z.rc_incident_L += firefly_filter(throughput_after_rc * albedo)
                     break
 
                 # RR is disabled for now since it complicates ReSTIR PT a litte bit
@@ -634,6 +634,20 @@ class Renderer:
 
             sample_coords = ti.cast(ti.Vector([i, j]) * self.render_scale[None], ti.i32)
             hdr_color = self.color_buffer[sample_coords.x, sample_coords.y]
+
+            # Compute 3x3 variance
+            avg = ti.Vector([0., 0., 0.])
+            sq_avg = ti.Vector([0., 0., 0.])
+            for offset in ti.grouped(ti.ndrange((-1,1),(-1,1))):
+                c = self.color_buffer[sample_coords + offset] / 9.0
+                avg += c
+                sq_avg += c * c
+            var = sq_avg - avg * avg
+            # Variance-based firefly rejection
+            dev = ti.sqrt(ti.max(var, 1e-5))
+            high_threshold = 0.1 + avg + dev * 4.0
+            overflow = ti.max(0.0, hdr_color - high_threshold)
+            hdr_color -= overflow
 
             ldr_color = ti.pow(
                 uchimura(hdr_color * darken * self.exposure), 1.0 / 2.2)

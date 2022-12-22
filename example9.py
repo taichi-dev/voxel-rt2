@@ -1,8 +1,8 @@
 from scene import Scene; import taichi as ti; from taichi.math import *
 scene = Scene(0, 2.75)
-scene.set_background_color((10.0, 10.0, 10.0))
+scene.set_background_color((0.3, 0.3, 0.3))
 scene.set_floor(-1e5, (0, 0, 0))
-scene.set_directional_light((0, 0.55, -1), 0.03, (0.9, 0.9, 0.9))
+scene.set_directional_light((0, 0.55, -1), 0.03, (0.9, 0.8, 0.7))
 @ti.func
 def rd(): return ti.random()
 @ti.func
