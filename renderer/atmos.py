@@ -22,6 +22,12 @@ def mie_phase(cos_theta, g):
     # Henyey-Greenstein phase
     return (1-g*g)/(4.0*np.pi*pow(1.0 + g*g - 2*g*cos_theta, 1.5))
 
+@ti.func
+def get_unit_vec(rand):
+    rand.x *= np.pi * 2.0; rand.y = rand.y * 2.0 - 1.0
+    ground = vec2(sin(rand.x), cos(rand.x)) * sqrt(1.0 - rand.y * rand.y)
+    return vec3(ground.x, ground.y, rand.y).normalized()
+
 
 @ti.data_oriented
 class Atmos:
@@ -38,6 +44,9 @@ class Atmos:
         self.extinc_mat = ti.Matrix([[self.rayleigh_coeff.x, self.rayleigh_coeff.y, self.rayleigh_coeff.z], \
                                      [self.mie_coeff*1.11, self.mie_coeff*1.11, self.mie_coeff*1.11]      , \
                                      [self.ozone_coeff.x, self.ozone_coeff.y, self.ozone_coeff.z]], ti.f32).transpose()
+        self.scatter_mat = ti.Matrix([[self.rayleigh_coeff.x, self.rayleigh_coeff.y, self.rayleigh_coeff.z], \
+                                      [self.mie_coeff, self.mie_coeff, self.mie_coeff]      , \
+                                      [0.0, 0.0, 0.0]], ti.f32).transpose()
 
         self.scale_height_rayl = 8500.0
         self.scale_height_mie  = 1200.0
@@ -48,7 +57,6 @@ class Atmos:
 
         self.planet_r = 6371e3
         self.atmos_height  = 110e3
-        self.atmos_inset_h = self.planet_r - 2e3
 
         self.trans_LUT = ti.Vector.field(3, dtype=ti.f16, shape=(256, 128))
 
@@ -60,22 +68,22 @@ class Atmos:
 
     @ti.func
     def sample_skybox(self, ray_dir):
-        texcoord = self.project_sky(ray_dir)
+        texcoord = self.project_sky((ray_dir + vec3(ti.random(), ti.random(), ti.random()) * 0.01).normalized())
         fcoord = ti.Vector([texcoord.x * self.skybox_res.x - 0.5, texcoord.y * self.skybox_res.y - 0.5])
         icoord = ti.cast(fcoord, ti.i32)
         f = fract(fcoord)
 
         bl = self.skybox_scattering[icoord.x, icoord.y]
-        br = self.skybox_scattering[icoord.x + 1, icoord.y]
-        tl = self.skybox_scattering[icoord.x, icoord.y + 1]
-        tr = self.skybox_scattering[icoord.x + 1, icoord.y + 1]
+        br = self.skybox_scattering[(icoord.x + 1) % self.skybox_res.x, icoord.y]
+        tl = self.skybox_scattering[icoord.x, (icoord.y + 1) % self.skybox_res.y]
+        tr = self.skybox_scattering[(icoord.x + 1) % self.skybox_res.x, (icoord.y + 1) % self.skybox_res.y]
 
         scatt = mix(mix(bl, br, f.x), mix(tl, tr, f.x), f.y)
 
         bl = self.skybox_transmittance[icoord.x, icoord.y]
-        br = self.skybox_transmittance[icoord.x + 1, icoord.y]
-        tl = self.skybox_transmittance[icoord.x, icoord.y + 1]
-        tr = self.skybox_transmittance[icoord.x + 1, icoord.y + 1]
+        br = self.skybox_transmittance[(icoord.x + 1) % self.skybox_res.x, icoord.y]
+        tl = self.skybox_transmittance[icoord.x, (icoord.y + 1) % self.skybox_res.y]
+        tr = self.skybox_transmittance[(icoord.x + 1) % self.skybox_res.x, (icoord.y + 1) % self.skybox_res.y]
 
         trans = mix(mix(bl, br, f.x), mix(tl, tr, f.x), f.y)
 
@@ -99,26 +107,25 @@ class Atmos:
 
     @ti.kernel
     def compute_skybox(self, sun_dir : vec3, sun_col : vec3, sun_cone_cos_theta_max : ti.f32):
-        cam_pos = vec3(0.0, self.planet_r, 0.0)
+        cam_pos = vec3(0.0, self.planet_r + 1000.0, 0.0)
 
         for u, v in self.skybox_scattering:
             texcoord = ti.Vector([u, v]) * self.skybox_fres
 
             ray_dir = self.unproject_sky(texcoord)
-            in_scatter, transmittance = self.atmospheric_scattering(cam_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max)
+            in_scatter, transmittance = self.atmospheric_scattering(cam_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, 0)
             self.skybox_scattering[u, v] = in_scatter
             self.skybox_transmittance[u, v] = transmittance
 
     @ti.func
-    def atmospheric_scattering(self, ray_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max):
+    def atmospheric_scattering(self, ray_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, depth : ti.template(), steps = 128):
         #
         # r(p) = ray_pos + ray_dir * lambda
         #
-        steps = 128
-        fsteps = 1.0 / 128.0
+        fsteps = 1.0 / ti.cast(steps, ti.f32)
 
         air_lambdas = rsi(ray_pos, ray_dir, self.planet_r + self.atmos_height)
-        planet_lamdas = rsi(ray_pos, ray_dir, self.atmos_inset_h)
+        planet_lamdas = rsi(ray_pos, ray_dir, self.planet_r)
         air_lambdas.y = min(air_lambdas.y, planet_lamdas.x) if planet_lamdas.x > 0.0 else air_lambdas.y
 
         step_delta = (air_lambdas.y - max(air_lambdas.x, 0.0)) * fsteps
@@ -126,47 +133,62 @@ class Atmos:
         ray_pos = ray_pos + ray_step*(0.5) # Midpoint rule gives better results than left rule
 
         transmittance = vec3(1., 1., 1.)
-        in_scatter_rayl = vec3(0., 0., 0.)
-        in_scatter_mie = vec3(0., 0., 0.)
+        in_scatter_col = vec3(0., 0., 0.)
         multiple_scattering = vec3(0., 0., 0.)
 
-        for i in range(0, steps):
-            h = self.get_elevation(ray_pos)
-            density = self.get_density(h)
+        if ti.static(depth <= 1):
 
-            step_od = self.extinc_mat @ (density * step_delta)
-            step_transmittance = saturate(exp(-step_od))
+            for i in range(0, steps):
+                h = self.get_elevation(ray_pos)
+                density = self.get_density(h)
 
-            # improved scattering integration (weighting) by Sébastian Hillaire
-            visible_scattering = transmittance * saturate((1.0 - step_transmittance)/step_od)
+                step_od = self.extinc_mat @ (density * step_delta)
+                step_transmittance = saturate(exp(-step_od))
 
-            
-            sun_ray_transmittance = self.read_trans_lut(ray_pos.normalized().dot(sun_dir), h)
-
-            # pick direct light sample
-            for j in range(0, 8):
-                sample_dir = sample_cone_oriented(sun_cone_cos_theta_max, sun_dir)
-                cos_theta = ray_dir.dot(sample_dir)
-                phases = ti.Vector([rayleigh_phase(cos_theta), mie_phase(cos_theta, self.mie_g)])
+                # improved scattering integration (weighting) by Sébastian Hillaire
+                visible_scattering = transmittance * saturate((1.0 - step_transmittance)/step_od)
 
                 
-                in_scatter_rayl += sun_ray_transmittance * visible_scattering * phases.x * density.x * step_delta / 8.0
-                in_scatter_mie  += sun_ray_transmittance * visible_scattering * phases.y * density.y * step_delta / 8.0
+                sun_ray_transmittance = self.read_trans_lut(ray_pos.normalized().dot(sun_dir), h)
 
-            # vec3 stepScattering = atmosScatterMat * density.xy * dd
-            # vec3 stepScatteringAlbedo = stepScattering / stepOpticalDepth
-            # vec3 multipleScatteringFactor = 0.84 * stepScatteringAlbedo
-            # vec3 multipleScatteringEnergy = multipleScatteringFactor / (1.0 - multipleScatteringFactor)
-            # multipleScattering += multipleScatteringEnergy * visibleScattering * stepScattering
+                # pick direct light sample
+                DIRECT_SAMPLE_COUNT = 8
+                for j in range(0, DIRECT_SAMPLE_COUNT):
+                    sample_dir = sample_cone_oriented(sun_cone_cos_theta_max, sun_dir)
+                    cos_theta = ray_dir.dot(sample_dir)
+                    phases = ti.Vector([rayleigh_phase(cos_theta), mie_phase(cos_theta, self.mie_g)])
+
+                    
+                    in_scatter_col += self.rayleigh_coeff * sun_col * sun_ray_transmittance * visible_scattering * phases.x * density.x * step_delta / ti.cast(DIRECT_SAMPLE_COUNT, ti.f32)
+                    in_scatter_col += self.mie_coeff * sun_col * sun_ray_transmittance * visible_scattering * phases.y * density.y * step_delta / ti.cast(DIRECT_SAMPLE_COUNT, ti.f32)
+                
+                # step_scattering = self.scatter_mat @ (density * step_delta)
+                # step_albedo = step_scattering / step_od
+                ms_energy = 3.3 # 0.75 * 0.84 * step_albedo / (1.0 - 0.84 * step_albedo)
+                # in_scatter_col += ambient_scatter * visible_scattering * step_scattering
+
+                # multiple scattering sample
+                MS_SAMPLE_COUNT = 8
+                for j in range(0, MS_SAMPLE_COUNT):
+                    sample_dir = get_unit_vec(vec2((j + ti.random()) / ti.cast(MS_SAMPLE_COUNT, ti.f32), fract(j * 1.618033988749)))
+                    cos_theta = ray_dir.dot(sample_dir)
+                    phases = ti.Vector([1.0, mie_phase(cos_theta, self.mie_g)])
+
+                    ambient_scatter, ambient_trans = self.atmospheric_scattering(ray_pos, sample_dir, sun_dir, sun_col, sun_cone_cos_theta_max, depth+1, 8)
+                    
+                    # Not using rayleigh phase here because it looks better for this bad multiple scattering
+                    in_scatter_col += ms_energy * self.rayleigh_coeff * ambient_scatter * visible_scattering * density.x * step_delta / ti.cast(MS_SAMPLE_COUNT, ti.f32)
+                    in_scatter_col += ms_energy * self.mie_coeff * ambient_scatter * visible_scattering * phases.y * density.y * step_delta / ti.cast(MS_SAMPLE_COUNT, ti.f32)
+
+                
+
+                transmittance *= step_transmittance
+
+                ray_pos += ray_step
 
 
-            transmittance *= step_transmittance
-
-            ray_pos += ray_step
-
-        in_scatter_col  = self.rayleigh_coeff * in_scatter_rayl * sun_col # factored constants out of sum
-        in_scatter_col += self.mie_coeff * in_scatter_mie * sun_col 
-        # multipleScattering = multipleScattering * ambient * 0.5
+            if planet_lamdas.x > 0.0:
+                transmittance *= 0.0
 
         return in_scatter_col, transmittance
 
@@ -238,7 +260,11 @@ class Atmos:
             od += densities * step_delta
             ray_pos += ray_step
         od = self.extinc_mat @ od
-        return ti.exp(-(od))
+        transmittance = ti.exp(-(od))
+
+        if rsi(ray_pos, ray_dir, self.planet_r).x > 0.0:
+            transmittance *= 0.0
+        return transmittance
 
     @ti.func
     def get_ozone_density(self, h):
@@ -250,7 +276,7 @@ class Atmos:
         h_peak_relative_sqr = h_km - peak_height # Square of difference between peak location
         h_peak_relative_sqr = h_peak_relative_sqr*h_peak_relative_sqr
 
-        peak_density = 0.6 # density at the peak
+        peak_density = 1. # density at the peak
         
         d = (peak_density - 0.375) * exp(-h_peak_relative_sqr / 49.0) # main peak
         d += 0.375 * exp(-h_peak_relative_sqr / 256.0) # "tail", makes falloff of peak more gradual
@@ -258,10 +284,11 @@ class Atmos:
                                                          # could modify the coefficients to model the small increase 
                                                          # in ozone at the very bottom that happens due to pollution
 
-        return d
+        return d * 4.
 
     @ti.func
     def get_density(self, h):
+        h = max(h, 0.0)
         return vec3(exp(-h/self.scale_height_rayl), exp(-h/self.scale_height_mie), self.get_ozone_density(h))
 
     @ti.func

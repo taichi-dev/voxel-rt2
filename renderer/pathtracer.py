@@ -12,7 +12,7 @@ from renderer.space_transformations import *
 from renderer.reservoir import *
 from renderer.atmos import *
 
-USE_RESTIR_PT = True
+USE_RESTIR_PT = False
 
 MAX_RAY_DEPTH = 4
 use_directional_light = True
@@ -456,8 +456,11 @@ class Renderer:
                                     light_sample_mis_weight = self.power_heuristic(light_sample_light_pdf, light_sample_bsdf_pdf)
 
                                 light_bsdf_diffuse, light_bsdf_specular = self.bsdf.disney_evaluate_split(hit_mat, view, normal, light_dir, tang, bitang)
-                                NEE_contrib_diffuse = light_sample_mis_weight * light_bsdf_diffuse * self.light_weight * self.light_color[None] * dot
-                                NEE_contrib_specular = light_sample_mis_weight * light_bsdf_specular * self.light_weight * self.light_color[None] * dot
+                                sky_transmittance = vec3(1., 1., 1.)
+                                if self.use_physical_atmosphere[None] == 1:
+                                    sky_transmittance = self.atmos.sample_skybox_transmittance(light_dir)
+                                NEE_contrib_diffuse = light_sample_mis_weight * light_bsdf_diffuse * sky_transmittance * self.light_weight * self.light_color[None] * dot
+                                NEE_contrib_specular = light_sample_mis_weight * light_bsdf_specular * sky_transmittance * self.light_weight * self.light_color[None] * dot
                                 if depth == 0:
                                     first_vertex_NEE_diffuse  += firefly_filter(throughput * NEE_contrib_diffuse)
                                     first_vertex_NEE_specular += firefly_filter(throughput * NEE_contrib_specular)
