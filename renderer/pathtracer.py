@@ -851,7 +851,7 @@ class Renderer:
             center_n1 = decode_unit_vector_3x16(self.gbuff_normals[u, v])
 
             if is_vec_zero(center_x1):
-                self.color_buffer[u, v] = ti.cast(center_reservoir.z.F, ti.f16)
+                self.color_buffer[u, v] = center_reservoir.z.F
                 continue
 
             center_mat, center_mat_id = decode_material(self.mats.mat_list, self.gbuff_mat_id[u, v])
@@ -953,13 +953,13 @@ class Renderer:
 
             # Validate visibility for RIS pass chosen sample (if this RIS sample is occluded, use canonical sample)
             force_add_canonical = False
-            dir_to_rc_vertex = output_reservoir.z.rc_pos if is_vec_zero(output_reservoir.z.rc_normal) else (output_reservoir.z.rc_pos - center_x1).normalized()
-            dist, _, _, hit_light_, iters, smat = self.next_hit(center_x1 + center_n1*0.003*center_dist, dir_to_rc_vertex, inf, colors, shadow_ray=True)
-            actual_dist = inf if is_vec_zero(output_reservoir.z.rc_normal) else distance(center_x1, output_reservoir.z.rc_pos)
+            # dir_to_rc_vertex = output_reservoir.z.rc_pos if is_vec_zero(output_reservoir.z.rc_normal) else (output_reservoir.z.rc_pos - center_x1).normalized()
+            # dist, _, _, hit_light_, iters, smat = self.next_hit(center_x1 + center_n1*0.003*center_dist, dir_to_rc_vertex, inf, colors, shadow_ray=True)
+            # actual_dist = inf if is_vec_zero(output_reservoir.z.rc_normal) else distance(center_x1, output_reservoir.z.rc_pos)
 
-            if dist < inf and abs(dist - actual_dist) > 0.1*actual_dist:
-                output_reservoir.weight = 0.0
-                force_add_canonical = True
+            # if dist < inf and abs(dist - actual_dist) > 0.1*actual_dist:
+            #     output_reservoir.weight = 0.0
+            #     force_add_canonical = True
             
             
             center_p_hat = luminance(center_reservoir.z.F)
@@ -1213,7 +1213,7 @@ class Renderer:
             if self.camera_is_moving[None] == 1:
                 history.xyz *= center_mat.base_col
 
-            self.color_buffer[u, v] = ti.cast(history.xyz, ti.f16) 
+            self.color_buffer[u, v] = history.xyz
             
 
     @ti.func
@@ -1278,7 +1278,7 @@ class Renderer:
 
             self.history_buffer_specular[u, v, 1] = ti.cast(history, ti.f32)
             self.history_buffer_specular_depth[u, v, 1] = refl_depth_history
-            self.color_buffer[u, v] += ti.cast(history.xyz, ti.f16)
+            self.color_buffer[u, v] += history.xyz
 
         # ti.loop_config(block_dim=128)
         for u, v in self.color_buffer:

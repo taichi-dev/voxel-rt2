@@ -32,7 +32,7 @@ def get_unit_vec(rand):
 @ti.data_oriented
 class Atmos:
     def __init__(self):
-        # Constants
+        # Atmos Constants
         self.air_num_density       = 2.5035422e25
         self.ozone_peak = 8e-6
         self.ozone_num_density     = self.air_num_density * 0.012588 * self.ozone_peak
@@ -55,15 +55,22 @@ class Atmos:
 
         self.mie_g = 0.75
 
-        self.planet_r = 6371e3
+        self.planet_r_offset = 5e3
+        self.planet_r = 6371e3 - self.planet_r_offset
         self.atmos_height  = 110e3
 
         self.trans_LUT = ti.Vector.field(3, dtype=ti.f16, shape=(256, 128))
 
-        self.skybox_fres = ti.Vector([1.0/5120.0, 1.0/2560.0])
-        self.skybox_res = ti.Vector([5120, 2560])
+        self.skybox_fres = ti.Vector([1.0/5120.0, 1.0/1280.0])
+        self.skybox_res = ti.Vector([5120, 1280])
         self.skybox_scattering = ti.Vector.field(3, dtype=ti.f32, shape=(self.skybox_res.x, self.skybox_res.y))
         self.skybox_transmittance = ti.Vector.field(3, dtype=ti.f32, shape=(self.skybox_res.x, self.skybox_res.y))
+        # Cloud constants
+        self.cloud_height = 1000.0
+        self.cloud_thickness = 150.0
+        self.cloud_density = 1.0
+        self.cloud_extinc = 0.1
+        self.cloud_scatter = self.cloud_extinc
         #############
 
     @ti.func
@@ -97,9 +104,9 @@ class Atmos:
         f = fract(fcoord)
 
         bl = self.skybox_transmittance[icoord.x, icoord.y]
-        br = self.skybox_transmittance[icoord.x + 1, icoord.y]
-        tl = self.skybox_transmittance[icoord.x, icoord.y + 1]
-        tr = self.skybox_transmittance[icoord.x + 1, icoord.y + 1]
+        br = self.skybox_transmittance[(icoord.x + 1) % self.skybox_res.x, icoord.y]
+        tl = self.skybox_transmittance[icoord.x, (icoord.y + 1) % self.skybox_res.y]
+        tr = self.skybox_transmittance[(icoord.x + 1) % self.skybox_res.x, (icoord.y + 1) % self.skybox_res.y]
 
         trans = mix(mix(bl, br, f.x), mix(tl, tr, f.x), f.y)
 
@@ -107,15 +114,24 @@ class Atmos:
 
     @ti.kernel
     def compute_skybox(self, sun_dir : vec3, sun_col : vec3, sun_cone_cos_theta_max : ti.f32):
-        cam_pos = vec3(0.0, self.planet_r + 1000.0, 0.0)
+        cam_pos = vec3(0.0, self.planet_r + self.planet_r_offset + 10.0, 0.0)
 
         for u, v in self.skybox_scattering:
-            texcoord = ti.Vector([u, v]) * self.skybox_fres
+            texcoord = (ti.Vector([u, v]) + 0.5) * self.skybox_fres
 
             ray_dir = self.unproject_sky(texcoord)
             in_scatter, transmittance = self.atmospheric_scattering(cam_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, 0)
             self.skybox_scattering[u, v] = in_scatter
             self.skybox_transmittance[u, v] = transmittance
+
+    @ti.func
+    def clouds_scattering(self, ray_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max):
+        steps = 128
+        fsteps = 1.0 / ti.cast(steps, ti.f32)
+
+        bottom_cloud_lambda = rsi(ray_pos, ray_dir, self.planet_r + self.planet_r_offset + self.cloud_height).y
+        top_cloud_lambda = rsi(ray_pos, ray_dir, self.planet_r + self.planet_r_offset + self.cloud_height + self.cloud_thickness).y
+        planet_lambda = rsi(ray_pos, ray_dir, self.planet_r).x
 
     @ti.func
     def atmospheric_scattering(self, ray_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, depth : ti.template(), steps = 128):
@@ -125,8 +141,8 @@ class Atmos:
         fsteps = 1.0 / ti.cast(steps, ti.f32)
 
         air_lambdas = rsi(ray_pos, ray_dir, self.planet_r + self.atmos_height)
-        planet_lamdas = rsi(ray_pos, ray_dir, self.planet_r)
-        air_lambdas.y = min(air_lambdas.y, planet_lamdas.x) if planet_lamdas.x > 0.0 else air_lambdas.y
+        planet_lambdas = rsi(ray_pos, ray_dir, self.planet_r)
+        air_lambdas.y = min(air_lambdas.y, planet_lambdas.x) if planet_lambdas.x > 0.0 else air_lambdas.y
 
         step_delta = (air_lambdas.y - max(air_lambdas.x, 0.0)) * fsteps
         ray_step = ray_dir*step_delta
@@ -148,8 +164,6 @@ class Atmos:
                 # improved scattering integration (weighting) by Sébastian Hillaire
                 visible_scattering = transmittance * saturate((1.0 - step_transmittance)/step_od)
 
-                
-                sun_ray_transmittance = self.read_trans_lut(ray_pos.normalized().dot(sun_dir), h)
 
                 # pick direct light sample
                 DIRECT_SAMPLE_COUNT = 8
@@ -157,6 +171,8 @@ class Atmos:
                     sample_dir = sample_cone_oriented(sun_cone_cos_theta_max, sun_dir)
                     cos_theta = ray_dir.dot(sample_dir)
                     phases = ti.Vector([rayleigh_phase(cos_theta), mie_phase(cos_theta, self.mie_g)])
+
+                    sun_ray_transmittance = self.read_trans_lut(ray_pos.normalized().dot(sample_dir), h)
 
                     
                     in_scatter_col += self.rayleigh_coeff * sun_col * sun_ray_transmittance * visible_scattering * phases.x * density.x * step_delta / ti.cast(DIRECT_SAMPLE_COUNT, ti.f32)
@@ -187,7 +203,7 @@ class Atmos:
                 ray_pos += ray_step
 
 
-            if planet_lamdas.x > 0.0:
+            if planet_lambdas.x > 0.0:
                 transmittance *= 0.0
 
         return in_scatter_col, transmittance
@@ -195,8 +211,7 @@ class Atmos:
     # Skybox parameterization from https://sebh.github.io/publications/egsr2020.pdf
     @ti.func
     def project_sky(self, ray_dir):
-
-        projected_dir = ray_dir.normalized().xz
+        projected_dir = (ray_dir.xz).normalized()
 
         horizon_angle  = np.pi * 0.5
         azimuth  = np.pi + atan2(projected_dir.x, -projected_dir.y)
@@ -225,7 +240,7 @@ class Atmos:
 
     @ti.func
     def read_trans_lut(self, cos_theta, h):
-        sample_uv = ti.cast(ti.Vector([min((cos_theta*0.5 + 0.5) * 256, 255), min((h/self.atmos_height) * 128, 127)]), ti.i32)
+        sample_uv = ti.cast(ti.Vector([clamp((cos_theta*0.5 + 0.5) * 256, 0, 255), clamp((h/self.atmos_height) * 128, 0, 127)]), ti.i32)
         return self.trans_LUT[sample_uv.x, sample_uv.y]
 
     @ti.kernel

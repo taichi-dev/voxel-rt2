@@ -4,10 +4,10 @@ from scene import Scene
 import taichi as ti
 from taichi.math import *
 
-scene = Scene(voxel_edges=0, exposure=1.4)
+scene = Scene(voxel_edges=0, exposure=17.4)
 scene.set_floor(-0.85, (1.0, 1.0, 1.0))
 scene.set_background_color((0.5, 0.5, 0.4)) # (0.5, 0.5, 0.4)
-scene.set_directional_light((1, 0.06, -1), 0.2, (1, 0.8, 0.6)) # (1, 0.8, 0.6)
+scene.set_directional_light((1, 0., -1), 0.025, (1, 0.8, 0.6)) # (1, 0.8, 0.6)
 scene.set_use_physical_sky(True)
 
 

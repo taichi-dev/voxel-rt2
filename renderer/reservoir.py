@@ -62,13 +62,13 @@ class Reservoir:
         self.z.cached_jacobian_term = dir_x1_to_x2.dot(dir_x1_to_x2)/abs(dir_x1_to_x2.normalized().dot(self.z.rc_normal))
 
     @ti.func
-    def input_sample(self, in_w, in_z):
+    def input_sample(self, in_w, in_z, force_add = False):
         self.M += 1
 
         selected = False
         if(in_w > 0.):
             self.weight += in_w
-            selected = ti.random() * self.weight <= in_w
+            selected = ti.random() * self.weight <= in_w or force_add
             if selected:
                 self.z = in_z
         return selected
