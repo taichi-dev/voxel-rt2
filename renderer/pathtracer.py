@@ -317,6 +317,7 @@ class Renderer:
             self.world.voxel_material, ti.Vector(self.world.voxel_grid_offset))
         
         if self.use_physical_atmosphere[None] == 1:
+            self.atmos.load_textures()
             print("Generating atmosphere LUT")
             self.atmos.generate_transmittance_lut()
             print("Computing atmosphere")
@@ -953,13 +954,13 @@ class Renderer:
 
             # Validate visibility for RIS pass chosen sample (if this RIS sample is occluded, use canonical sample)
             force_add_canonical = False
-            # dir_to_rc_vertex = output_reservoir.z.rc_pos if is_vec_zero(output_reservoir.z.rc_normal) else (output_reservoir.z.rc_pos - center_x1).normalized()
-            # dist, _, _, hit_light_, iters, smat = self.next_hit(center_x1 + center_n1*0.003*center_dist, dir_to_rc_vertex, inf, colors, shadow_ray=True)
-            # actual_dist = inf if is_vec_zero(output_reservoir.z.rc_normal) else distance(center_x1, output_reservoir.z.rc_pos)
+            dir_to_rc_vertex = output_reservoir.z.rc_pos if is_vec_zero(output_reservoir.z.rc_normal) else (output_reservoir.z.rc_pos - center_x1).normalized()
+            dist, _, _, hit_light_, iters, smat = self.next_hit(center_x1 + center_n1*0.003*center_dist, dir_to_rc_vertex, inf, colors, shadow_ray=True)
+            actual_dist = inf if is_vec_zero(output_reservoir.z.rc_normal) else distance(center_x1, output_reservoir.z.rc_pos)
 
-            # if dist < inf and abs(dist - actual_dist) > 0.1*actual_dist:
-            #     output_reservoir.weight = 0.0
-            #     force_add_canonical = True
+            if dist < inf and abs(dist - actual_dist) > 0.1*actual_dist:
+                output_reservoir.weight = 0.0
+                force_add_canonical = True
             
             
             center_p_hat = luminance(center_reservoir.z.F)
