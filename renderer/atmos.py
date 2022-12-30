@@ -3,7 +3,6 @@ import taichi as ti
 from taichi.math import *
 import numpy as np
 from renderer.math_utils import *
-from PIL import Image
 
 @ti.func
 def rsi(pos, dir, r):
@@ -68,25 +67,27 @@ class Atmos:
         self.skybox_transmittance = ti.Vector.field(3, dtype=ti.f32, shape=(self.skybox_res.x, self.skybox_res.y))
         # Cloud constants
         self.cloud_height = 1000.0
-        self.cloud_thickness = 100.0
-        self.cloud_density = 1.5
+        self.cloud_thickness = 110.0
+        self.cloud_density = 0.35
         self.cloud_extinc = 0.1
         self.cloud_scatter = self.cloud_extinc
         #############
 
         self.cloud_noise = ti.Vector.field(3, dtype=ti.u8, shape=(256, 256))
+        self.blue_noise = ti.Vector.field(3, dtype=ti.u8, shape=(64, 64))
 
     def load_textures(self):
-        # self.cloud_noise.from_numpy(ti.tools.imread('textures/cloud_noise.png'))
-        load_image = ti.tools.imread('textures/cloud_noise.jpg') # np.array(Image.open('textures/cloud_noise.jpg'), dtype=np.float32)
-        # load_image /= 255.0
+        load_image = ti.tools.imread('textures/cloud_noise.jpg')
         self.cloud_noise.from_numpy(load_image)
+
+        load_image = ti.tools.imread('textures/blue_noise.jpg')
+        self.blue_noise.from_numpy(load_image)
 
     ### SKY SAMPLING and KERNEL FUNCTION ###
 
     @ti.func
     def sample_skybox(self, ray_dir):
-        texcoord = self.project_sky((ray_dir + vec3(ti.random(), ti.random(), ti.random()) * 0.002).normalized())
+        texcoord = self.project_sky((ray_dir + vec3(ti.random(), ti.random(), ti.random()) * 0.0035).normalized())
         fcoord = ti.Vector([texcoord.x * self.skybox_res.x - 0.5, texcoord.y * self.skybox_res.y - 0.5])
         icoord = ti.cast(fcoord, ti.i32)
         f = fract(fcoord)
@@ -131,8 +132,9 @@ class Atmos:
             texcoord = (ti.Vector([u, v]) + 0.5) * self.skybox_fres
             ray_dir = self.unproject_sky(texcoord)
 
-            cloud_in_scatter, cloud_transmittance, cloud_dist = self.clouds_scattering(cam_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max)
-            cloud_dist *= 2.5
+            noise_coord = ti.Vector([u, v]) % 64
+
+            cloud_in_scatter, cloud_transmittance, cloud_dist = self.clouds_scattering(cam_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, self.blue_noise[noise_coord.x, noise_coord.y] / 255.0)
 
 
             sky_in_scatter_total, sky_transmittance_total = self.atmospheric_scattering(cam_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, 0)
@@ -160,7 +162,7 @@ class Atmos:
     @ti.func
     def sample_cloud_density(self, ray_pos):
         tile_size = 23000.0
-        ray_pos.xz += tile_size * 0.4
+        ray_pos.xz += tile_size * 0.42
         UV = mod(ray_pos.xz, vec2(tile_size, tile_size)) / tile_size
         COORDS = ti.cast(UV * 256, ti.i32)
         if COORDS.x < 0.0: 
@@ -179,7 +181,7 @@ class Atmos:
         return max_distance * pow(exponent, iteration - max_iteration) # * (iteration/(max_iteration- 1.0)) # 
 
     @ti.func
-    def clouds_shadow_od(self, ray_origin, ray_dir):
+    def clouds_shadow_od(self, ray_origin, ray_dir, dither):
         # ray_origin MUST be WITHIN cloud layer
 
         # bottom_cloud_lambda = rsi(ray_origin, ray_dir, self.planet_r + self.planet_r_offset + self.cloud_height).y
@@ -187,35 +189,38 @@ class Atmos:
         max_distance = top_cloud_lambda
 
         # exponential step size so that we can get detailed short-distance shadows as well as long distance shadows
-        steps = 32
-        exponent = 1.1
-        prev_lambda = 0.
-        ray_lambda = self.exponential_dist(0, steps, exponent, max_distance) * ti.random()
-
+        steps = 10
+        exponent = 1.6
+        step_delta = 24.0 / ti.cast(steps, ti.f32)
         od = 0.0
+        ray_pos = ray_origin
+        ray_step = ray_dir * step_delta
         for i in range(0, steps):
-            ray_pos = ray_origin + ray_dir * ray_lambda
+            ray_step *= exponent
+            step_delta *= exponent
 
-            step_delta = ray_lambda - prev_lambda
+            dithered_ray_pos = ray_pos + ray_step * dither
 
-            density = self.sample_cloud_density(ray_pos)
+            relative_height = length(dithered_ray_pos) - self.planet_r - self.planet_r_offset 
+            if (relative_height < self.cloud_height or relative_height > self.cloud_height + self.cloud_thickness):
+                continue
 
-            od += density * self.cloud_extinc * step_delta
+            od += self.sample_cloud_density(dithered_ray_pos) * step_delta
 
-            prev_lambda = ray_lambda
-            ray_lambda = self.exponential_dist(i+1, steps, exponent, max_distance)
+            ray_pos += ray_step
 
         return od
 
     @ti.func
     def cloud_phase(self, cos_theta, an):
-        front = mie_phase(cos_theta, 0.92 * an)
+        peak = mie_phase(cos_theta, 0.92 * an)
+        front = mie_phase(cos_theta, 0.4 * an)
         back = mie_phase(cos_theta, -0.4 * an)
-        return mix(front, back, 0.55)
+        return mix(mix(front, back, 0.25), peak, 0.15)
 
     @ti.func
-    def clouds_scattering(self, ray_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max):
-        steps = 64
+    def clouds_scattering(self, ray_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, dither):
+        steps = 128
         fsteps = 1.0 / ti.cast(steps, ti.f32)
 
         bottom_cloud_lambda = rsi(ray_pos, ray_dir, self.planet_r + self.planet_r_offset + self.cloud_height).y
@@ -232,13 +237,13 @@ class Atmos:
 
         ray_origin = ray_pos
 
-        if planet_lambda <= 0.0: # did not hit planet
+        if planet_lambda <= 0.0 or True: # did not hit planet
             start = ray_pos + ray_dir * bottom_cloud_lambda
             end = ray_pos + ray_dir * top_cloud_lambda
 
             step_delta = (top_cloud_lambda - bottom_cloud_lambda) * fsteps
             ray_step = ray_dir * step_delta
-            ray_pos = start + ray_step * ti.random()
+            ray_pos = start + ray_step * dither
 
             distance_traveled = distance(start, ray_origin)
 
@@ -262,7 +267,7 @@ class Atmos:
                     sample_dir = sample_cone_oriented(sun_cone_cos_theta_max, sun_dir)
                     cos_theta = ray_dir.dot(sample_dir)
 
-                    sun_ray_od = self.clouds_shadow_od(ray_pos, sample_dir)
+                    sun_ray_od = self.clouds_shadow_od(ray_pos, sample_dir, dither)
                     sun_atmos_transmittance = self.read_trans_lut(ray_pos.normalized().dot(sample_dir), self.get_elevation(ray_pos))
 
                     # Multiple scattering as sum of octaves of scattering http://magnuswrenninge.com/wp-content/uploads/2010/03/Wrenninge-OzTheGreatAndVolumetric.pdf
