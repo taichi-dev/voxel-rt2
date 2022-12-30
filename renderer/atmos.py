@@ -74,12 +74,12 @@ class Atmos:
         self.cloud_scatter = self.cloud_extinc
         #############
 
-        self.cloud_noise = ti.Vector.field(3, dtype=ti.f32, shape=(256, 256))
+        self.cloud_noise = ti.Vector.field(3, dtype=ti.u8, shape=(256, 256))
 
     def load_textures(self):
         # self.cloud_noise.from_numpy(ti.tools.imread('textures/cloud_noise.png'))
-        load_image = np.array(Image.open('textures/cloud_noise.jpg'), dtype=np.float32)
-        load_image /= 255.0
+        load_image = ti.tools.imread('textures/cloud_noise.jpg') # np.array(Image.open('textures/cloud_noise.jpg'), dtype=np.float32)
+        # load_image /= 255.0
         self.cloud_noise.from_numpy(load_image)
 
     ### SKY SAMPLING and KERNEL FUNCTION ###
@@ -168,7 +168,7 @@ class Atmos:
         if COORDS.y < 0.0: 
             COORDS.y = COORDS.y + tile_size
 
-        cloud = self.cloud_noise[COORDS.x, COORDS.y].x
+        cloud = ti.cast(self.cloud_noise[COORDS.x, COORDS.y].x, ti.f32) / 255.0
         relative_height = length(ray_pos) - self.planet_r - self.planet_r_offset
         is_in_layer = (relative_height > self.cloud_height and relative_height < self.cloud_height + self.cloud_thickness) 
         return self.cloud_density * cloud if is_in_layer else 0.0
