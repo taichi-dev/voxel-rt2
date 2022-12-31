@@ -4,6 +4,8 @@ from taichi.math import *
 import numpy as np
 from renderer.math_utils import *
 
+render_planet = False
+
 @ti.func
 def rsi(pos, dir, r):
     b     = pos.dot(dir)
@@ -55,7 +57,7 @@ class Atmos:
 
         self.mie_g = 0.75
 
-        self.planet_r_offset = 5e3
+        self.planet_r_offset = 0e3
         self.planet_r = 6371e3 - self.planet_r_offset
         self.atmos_height  = 110e3
 
@@ -66,19 +68,20 @@ class Atmos:
         self.skybox_scattering = ti.Vector.field(3, dtype=ti.f32, shape=(self.skybox_res.x, self.skybox_res.y))
         self.skybox_transmittance = ti.Vector.field(3, dtype=ti.f32, shape=(self.skybox_res.x, self.skybox_res.y))
         # Cloud constants
-        self.cloud_height = 1000.0
-        self.cloud_thickness = 110.0
-        self.cloud_density = 0.35
-        self.cloud_extinc = 0.1
+        self.use_clouds = ti.field(dtype=ti.i32, shape=())
+        self.cloud_height = 1000.0 + 1e3
+        self.cloud_thickness = 170.0*2.0
+        self.cloud_density = 0.27
+        self.cloud_extinc = 0.075
         self.cloud_scatter = self.cloud_extinc
         #############
 
-        self.cloud_noise = ti.Vector.field(3, dtype=ti.u8, shape=(256, 256))
+        self.cloud_tex = ti.Vector.field(3, dtype=ti.u8, shape=(256, 256))
         self.blue_noise = ti.Vector.field(3, dtype=ti.u8, shape=(64, 64))
 
     def load_textures(self):
-        load_image = ti.tools.imread('textures/cloud_noise.jpg')
-        self.cloud_noise.from_numpy(load_image)
+        load_image = ti.tools.imread('textures/cloud_texture.jpg')
+        self.cloud_tex.from_numpy(load_image)
 
         load_image = ti.tools.imread('textures/blue_noise.jpg')
         self.blue_noise.from_numpy(load_image)
@@ -87,7 +90,7 @@ class Atmos:
 
     @ti.func
     def sample_skybox(self, ray_dir):
-        texcoord = self.project_sky((ray_dir + vec3(ti.random(), ti.random(), ti.random()) * 0.0035).normalized())
+        texcoord = self.project_sky((ray_dir + vec3(ti.random(), ti.random(), ti.random()) * 0.003).normalized())
         fcoord = ti.Vector([texcoord.x * self.skybox_res.x - 0.5, texcoord.y * self.skybox_res.y - 0.5])
         icoord = ti.cast(fcoord, ti.i32)
         f = fract(fcoord)
@@ -126,7 +129,9 @@ class Atmos:
 
     @ti.kernel
     def compute_skybox(self, sun_dir : vec3, sun_col : vec3, sun_cone_cos_theta_max : ti.f32):
-        cam_pos = vec3(0.0, self.planet_r + self.planet_r_offset + 10.0, 0.0)
+        cam_pos = vec3(0.0, self.planet_r + self.planet_r_offset + 1e3, 0.0)
+
+        sky_ambient, sky_transmittance_ambient = self.atmospheric_scattering(cam_pos + vec3(0., self.cloud_height, 0.), vec3(0., 1., 0.), sun_dir, sun_col, sun_cone_cos_theta_max, 0)
 
         for u, v in self.skybox_scattering:
             texcoord = (ti.Vector([u, v]) + 0.5) * self.skybox_fres
@@ -134,11 +139,15 @@ class Atmos:
 
             noise_coord = ti.Vector([u, v]) % 64
 
-            cloud_in_scatter, cloud_transmittance, cloud_dist = self.clouds_scattering(cam_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, self.blue_noise[noise_coord.x, noise_coord.y] / 255.0)
-
+            cloud_in_scatter, cloud_transmittance, cloud_dist = self.clouds_scattering(cam_pos, ray_dir, \
+                                                                                       sun_dir, sun_col, sun_cone_cos_theta_max, \
+                                                                                       self.blue_noise[noise_coord.x, noise_coord.y] / 255.0, \
+                                                                                       sky_ambient)
+            cloud_in_scatter *= 1.2
 
             sky_in_scatter_total, sky_transmittance_total = self.atmospheric_scattering(cam_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, 0)
-            sky_in_scatter_from_cloud, sky_transmittance_from_cloud = self.atmospheric_scattering(cam_pos + ray_dir * cloud_dist, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, 0)
+            cloud_pos = cam_pos + ray_dir * cloud_dist
+            sky_in_scatter_from_cloud, sky_transmittance_from_cloud = self.atmospheric_scattering(cloud_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, 0)
 
             sky_in_scatter_to_cloud = sky_in_scatter_total - sky_in_scatter_from_cloud # sky_in_scatter_total == sky_in_scatter_to_cloud + sky_in_scatter_from_cloud
             transmittance_to_cloud = sky_transmittance_total / sky_transmittance_from_cloud # sky_transmittance_total == sky_transmittance_from_cloud * sky_transmittance_to_cloud
@@ -148,7 +157,7 @@ class Atmos:
             # in_scattering += transmittance_to_cloud * cloud_transmittance * sky_transmittance_from_cloud
 
             in_scattering = sky_in_scatter_total
-            if cloud_transmittance < 1.0:
+            if cloud_transmittance < 1.0 and self.use_clouds[None] == 1:
                 in_scattering -= sky_in_scatter_from_cloud * transmittance_to_cloud * (1.0 - cloud_transmittance)
                 in_scattering += cloud_in_scatter * transmittance_to_cloud
 
@@ -161,8 +170,8 @@ class Atmos:
 
     @ti.func
     def sample_cloud_density(self, ray_pos):
-        tile_size = 23000.0
-        ray_pos.xz += tile_size * 0.42
+        tile_size = 29000.0
+        ray_pos.xz += tile_size * 0.65
         UV = mod(ray_pos.xz, vec2(tile_size, tile_size)) / tile_size
         COORDS = ti.cast(UV * 256, ti.i32)
         if COORDS.x < 0.0: 
@@ -170,10 +179,25 @@ class Atmos:
         if COORDS.y < 0.0: 
             COORDS.y = COORDS.y + tile_size
 
-        cloud = ti.cast(self.cloud_noise[COORDS.x, COORDS.y].x, ti.f32) / 255.0
         relative_height = length(ray_pos) - self.planet_r - self.planet_r_offset
+
+        cloud_texture = ti.cast(self.cloud_tex[COORDS.x, COORDS.y], ti.f32) / 255.0
+        if cloud_texture.x < 0.7:
+            cloud_texture.x = 0.0
+        if cloud_texture.y < 0.7:
+            cloud_texture.y = 0.0
+        if cloud_texture.z < 0.7:
+            cloud_texture.z = 0.0
+        cloud = 0.0
+        if relative_height < self.cloud_height + self.cloud_thickness*0.65:
+            cloud += cloud_texture.x
+        else:
+            cloud += cloud_texture.y
+
+        coverage = cloud_texture.z
+        
         is_in_layer = (relative_height > self.cloud_height and relative_height < self.cloud_height + self.cloud_thickness) 
-        return self.cloud_density * cloud if is_in_layer else 0.0
+        return self.cloud_density * coverage * cloud if is_in_layer else 0.0
 
     @ti.func
     def exponential_dist(self, iteration, max_iteration, exponent, max_distance):
@@ -189,7 +213,7 @@ class Atmos:
         max_distance = top_cloud_lambda
 
         # exponential step size so that we can get detailed short-distance shadows as well as long distance shadows
-        steps = 10
+        steps = 8
         exponent = 1.6
         step_delta = 24.0 / ti.cast(steps, ti.f32)
         od = 0.0
@@ -215,11 +239,11 @@ class Atmos:
     def cloud_phase(self, cos_theta, an):
         peak = mie_phase(cos_theta, 0.92 * an)
         front = mie_phase(cos_theta, 0.4 * an)
-        back = mie_phase(cos_theta, -0.4 * an)
-        return mix(mix(front, back, 0.25), peak, 0.15)
+        back = mie_phase(cos_theta, -0.55 * an)
+        return mix(mix(front, back, 0.5), peak, 0.15)
 
     @ti.func
-    def clouds_scattering(self, ray_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, dither):
+    def clouds_scattering(self, ray_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, dither, ambient):
         steps = 128
         fsteps = 1.0 / ti.cast(steps, ti.f32)
 
@@ -278,6 +302,14 @@ class Atmos:
                         # not multiplying by density * step_delta since it cancels with step_weight
                         in_scatter += visible_scattering * an * self.cloud_scatter * phase * exp(-sun_ray_od * self.cloud_extinc * an) * sun_atmos_transmittance * sun_col / ti.cast(DIRECT_SAMPLE_COUNT, ti.f32)
                         an *= 0.5
+                
+                # ambient
+                ambient_ray_od = self.clouds_shadow_od(ray_pos, vec3(0., 1., 0.), dither)
+                an = 1.0
+                for k in range(0, 4):
+                    # not multiplying by density * step_delta since it cancels with step_weight
+                    in_scatter += visible_scattering * an * self.cloud_scatter / (4.0 * np.pi) * exp(-ambient_ray_od * self.cloud_extinc * an) * ambient
+                    an *= 0.5
 
                 transmittance *= step_transmittance
 

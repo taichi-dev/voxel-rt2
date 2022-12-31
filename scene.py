@@ -9,7 +9,7 @@ import __main__
 
 
 VOXEL_DX = 1 / 64
-SCREEN_RES = (1920, 1080)
+SCREEN_RES = (1440*2, 1080)
 UP_DIR = (0, 1, 0)
 HELP_MSG = """
 ====================================================
@@ -164,6 +164,12 @@ class Scene:
             self.renderer.use_physical_atmosphere[None] = 1
         else:
             self.renderer.use_physical_atmosphere[None] = 0
+    
+    def set_use_clouds(self, use):
+        if use:
+            self.renderer.atmos.use_clouds[None] = 1
+        else:
+            self.renderer.atmos.use_clouds[None] = 0
 
     def finish(self):
         self.renderer.prepare_data()
