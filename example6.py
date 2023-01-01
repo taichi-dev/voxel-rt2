@@ -4,10 +4,10 @@ from scene import Scene
 import taichi as ti
 from taichi.math import *
 
-scene = Scene(voxel_edges=0, exposure=1.4)
+scene = Scene(voxel_edges=0, exposure=1.75)
 scene.set_floor(-0.85, (1.0, 1.0, 1.0))
 # scene.set_background_color((0.5, 0.5, 0.4)) # (0.5, 0.5, 0.4)
-scene.set_directional_light((1, 1, -1), 0.025, (1.0, 0.949, 0.937)) # (1, 0.8, 0.6)
+scene.set_directional_light((-1, 1, -1), 0.025, (1.0, 0.949, 0.937)) # (1, 0.8, 0.6)
 scene.set_use_physical_sky(True)
 scene.set_use_clouds(True)
 
@@ -26,9 +26,9 @@ def create_leaves(pos, radius, color):
             ti.ndrange((-radius, radius), (-radius, radius),
                        (-radius, +radius))):
         f = I / radius
-        h = 0.5 - max(f[1], -0.5) * 0.5
+        h = 0.5 - ti.max(f[1], -0.5) * 0.5
         d = vec2(f[0], f[2]).norm()
-        prob = max(0, 1 - d)**2 * h  # xz mask
+        prob = ti.max(0, 1 - d)**2 * h  # xz mask
         prob *= h  # y mask
         # noise
         prob += ti.sin(f[0] * 5 + pos[0]) * 0.02
@@ -49,7 +49,7 @@ def create_tree(pos, height, radius, color):
 
     # Ground
     for i, j in ti.ndrange((-radius, radius), (-radius, radius)):
-        prob = max((radius - vec2(i, j).norm()) / radius, 0)
+        prob = ti.max((radius - vec2(i, j).norm()) / radius, 0)
         prob = prob * prob
         if ti.random() < prob * prob:
             scene.set_voxel(pos + ivec3(i, 1, j), 11,

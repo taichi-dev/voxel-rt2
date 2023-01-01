@@ -313,16 +313,21 @@ class Renderer:
 
     def prepare_data(self):
         self.world.update_data()
-        self.voxel_raytracer._update_lods(
-            self.world.voxel_material, ti.Vector(self.world.voxel_grid_offset))
-        
+        self.voxel_raytracer._update_lods(self.world.voxel_material, ti.Vector(self.world.voxel_grid_offset))
+
         if self.use_physical_atmosphere[None] == 1:
             self.atmos.load_textures()
             print("Generating atmosphere LUT")
             self.atmos.generate_transmittance_lut()
-            print("Computing atmosphere")
+            self.atmos.compute_cloud_ambient(self.light_direction[None], self.light_color[None] * self.light_weight, self.light_cone_cos_theta_max[None])
+            self.atmos.skybox_scattering.fill(ti.Vector([0., 0., 0.]))
+            self.atmos.skybox_transmittance.fill(ti.Vector([0., 0., 0.]))
+
+    def accumulate_clouds(self, max_samples):
+            self.atmos.accumulate_clouds(self.light_direction[None], self.light_color[None] * self.light_weight, self.light_cone_cos_theta_max[None], max_samples)
+
+    def compute_atmosphere(self):
             self.atmos.compute_skybox(self.light_direction[None], self.light_color[None] * self.light_weight, self.light_cone_cos_theta_max[None])
-            print("Done atmosphere")
         
     @ti.func
     def generate_new_sample(self, u: ti.f32, v: ti.f32):
@@ -345,7 +350,7 @@ class Renderer:
     @ti.func
     def power_heuristic(self, a, b):
         a_sqr = a*a
-        p_sum = max(a_sqr + b*b, 1e-4)
+        p_sum = ti.max(a_sqr + b*b, 1e-4)
         return a_sqr/p_sum
 
     @ti.kernel
@@ -522,7 +527,7 @@ class Renderer:
 
                 # RR is disabled for now since it complicates ReSTIR PT a litte bit
                 # Russian roulette (with ReSTIR PT, we won't do RR on first bounce)
-                # max_c = clamp(throughput.max(), 0.0, 1.0)
+                # max_c = clamp(throughput.ti.max(), 0.0, 1.0)
                 # if ti.random() > max_c:
                 #     break
                 # else:
@@ -623,7 +628,7 @@ class Renderer:
 
             if ti.static(not USE_RESTIR_PT):
                 if self.camera_is_moving[None] == 1:
-                    diffuse /= max(primary_albedo, 1e-2) # de-modulate albedo (we do it later when ReSTIR is on)
+                    diffuse /= ti.max(primary_albedo, 1e-2) # de-modulate albedo (we do it later when ReSTIR is on)
             self.color_buffer[u, v] = ti.cast(diffuse, ti.f32)
             self.color_buffer_specular[u, v] = ti.cast(specular, ti.f32)
 
@@ -633,7 +638,7 @@ class Renderer:
             uv = ti.Vector([i, j]) / self.image_res
 
             darken = 1.0 - self.vignette_strength * \
-                max(ti.math.distance(uv, self.vignette_center) -
+                ti.max(ti.math.distance(uv, self.vignette_center) -
                     self.vignette_radius, 0.0)
 
             sample_coords = ti.cast(ti.Vector([i, j]) * self.render_scale[None], ti.i32)
@@ -783,8 +788,8 @@ class Renderer:
         # compute jacobian
         jacobian = 1.0 # limit case of escape vertices converges to one
 
-        # jacobian *= dst_rc_pdf / max(src_rc_pdf, 1e-4)
-        # jacobian *= dst_primary_pdf / max(src_primary_pdf, 1e-4)
+        # jacobian *= dst_rc_pdf / ti.max(src_rc_pdf, 1e-4)
+        # jacobian *= dst_primary_pdf / ti.max(src_primary_pdf, 1e-4)
 
         if not rc_is_escape_vertex:
             jacobian = src_reservoir.z.cached_jacobian_term
@@ -794,7 +799,7 @@ class Renderer:
         
         if jacobian < 0.0 or isnan(jacobian) or isinf(jacobian): 
             jacobian = 0.0
-            if max(jacobian, 1.0 / jacobian) > 11.0: # 11 rejection threshold
+            if ti.max(jacobian, 1.0 / jacobian) > 11.0: # 11 rejection threshold
                 diffuse  = vec3(0.0, 0.0, 0.0)
                 specular = vec3(0.0, 0.0, 0.0)
         
@@ -977,7 +982,7 @@ class Renderer:
             if pass_id == pass_total - 1:
                 emission = center_mat.base_col if center_mat_id == 2 else vec3(0.0, 0.0, 0.0)
                 if self.camera_is_moving[None] == 1:
-                    chosen_F_d /= max(center_mat.base_col, 1e-2) # de-modulate albedo
+                    chosen_F_d /= ti.max(center_mat.base_col, 1e-2) # de-modulate albedo
                 self.color_buffer[u, v] = ti.cast(chosen_F_d * clamp(output_reservoir.weight, 0.0, 50.0) + emission, ti.f32)
                 self.color_buffer_specular[u, v] = ti.cast(chosen_F_s * clamp(output_reservoir.weight, 0.0, 50.0), ti.f32)
 
@@ -1057,7 +1062,7 @@ class Renderer:
             mean_sqr /= weight_sum
 
             self.specular_mean[u, v] = mean
-            self.specular_stdev[u, v] = ti.sqrt(max(mean_sqr - mean * mean, 0.0))
+            self.specular_stdev[u, v] = ti.sqrt(ti.max(mean_sqr - mean * mean, 0.0))
 
             self.gbuff_depth_reflection[u, v] = refl_depth_sum / valid_reflection_depths if valid_reflection_depths > 0.01 else 0.0
 
@@ -1106,15 +1111,15 @@ class Renderer:
                     w *= 1.0 if center_normal.dot(tap_normal) > 0.642 else 0.0
 
                 col = self.history_buffer[tap_coord.x, tap_coord.y, 0]
-                col_max = max(col_max, col)
-                col_min = min(col_min, col)
+                col_max = ti.max(col_max, col)
+                col_min = ti.min(col_min, col)
 
                 col_sum += col * w
                 weight_sum += w
         
         col_sum /= weight_sum
 
-        return weight_sum, max(clamp(col_sum, col_min, col_max), ti.Vector([0., 0., 0., 1.])) # anti-ringing
+        return weight_sum, ti.max(clamp(col_sum, col_min, col_max), ti.Vector([0., 0., 0., 1.])) # anti-ringing
 
     @ti.func
     def history_filter_specular(self, uv, center_depth, center_normal):
@@ -1151,12 +1156,12 @@ class Renderer:
                     # w *= 1.0 if abs(tap_depth - center_depth)/center_depth < 0.05 else 0.0
 
                 col = self.history_buffer_specular[tap_coord.x, tap_coord.y, 0]
-                col_max = max(col_max, col)
-                col_min = min(col_min, col)
+                col_max = ti.max(col_max, col)
+                col_min = ti.min(col_min, col)
 
                 refl_depth = self.history_buffer_specular_depth[tap_coord.x, tap_coord.y, 0]
-                depth_min = min(depth_min, refl_depth)
-                depth_max = max(depth_max, refl_depth)
+                depth_min = ti.min(depth_min, refl_depth)
+                depth_max = ti.max(depth_max, refl_depth)
 
                 col_sum += col * w
                 depth_sum += refl_depth * w
@@ -1166,7 +1171,7 @@ class Renderer:
         depth_sum /= weight_sum
 
         return weight_sum, \
-               max(clamp(col_sum, col_min, col_max), ti.Vector([0., 0., 0., 1.])), \
+               ti.max(clamp(col_sum, col_min, col_max), ti.Vector([0., 0., 0., 1.])), \
                clamp(depth_sum, depth_min, depth_max) # anti-ringing
 
     @ti.kernel
@@ -1201,7 +1206,7 @@ class Renderer:
                 history = self.history_buffer[u, v, 0]
 
             if w_sum > 1e-3:
-                history.w = min(history.w + 1.0, self.max_accum_frames[None])
+                history.w = ti.min(history.w + 1.0, self.max_accum_frames[None])
                 history.xyz = mix(history.xyz, current, 1.0 / history.w)
             else:
                 history = ti.Vector([current.x, current.y, current.z, 1.0])
@@ -1220,7 +1225,7 @@ class Renderer:
     @ti.func
     def history_clamp(self, current, history, mean, radius):
         # idea from Kajiya (https://github.com/EmbarkStudios/kajiya/blob/main/assets/shaders/inc/soft_color_clamp.hlsl)
-        history_dist = abs(history - mean) / max(radius, abs(history * 0.1))
+        history_dist = abs(history - mean) / ti.max(radius, abs(history * 0.1))
 
         closest = clamp(history, current - radius, current + radius)
         return mix(history, closest, smoothstep(1.0, 3.0, history_dist))
@@ -1268,7 +1273,7 @@ class Renderer:
             #     history.xyz = self.history_clamp(current.xyz, history.xyz, mean, stdev * 2.0)
 
             if w_sum > 1e-3:
-                history.w = min(history.w + 1.0, self.max_accum_frames[None])
+                history.w = ti.min(history.w + 1.0, self.max_accum_frames[None])
                 history.xyz = mix(history.xyz, current, 1.0 / history.w)
                 refl_depth_history = mix(refl_depth_history, center_refl_depth, 1.0 / history.w)
             else:

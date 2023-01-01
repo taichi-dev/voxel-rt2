@@ -10,7 +10,7 @@ scene.set_floor(-0.05, (1.0, 1.0, 1.0))
 def initialize_voxels():
     n = 50
     for i, j in ti.ndrange(n, n):
-        if min(i, j) == 0 or max(i, j) == n - 1:
+        if ti.min(i, j) == 0 or ti.max(i, j) == n - 1:
             scene.set_voxel(vec3(i, 0, j), 2, vec3(0.9, 0.1, 0.1))
         else:
             scene.set_voxel(vec3(i, 0, j), 1, vec3(0.9, 0.1, 0.1))

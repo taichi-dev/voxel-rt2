@@ -50,7 +50,7 @@ def build_building(X, uv, d, r):
     fl = int(3 + 10 * r); style = rand(r, 5)
     wall = vec3(rand(r, 1),rand(r, 2),rand(r, 2)) * 0.2+0.4
     wall2 = mix(vec3(rand(r, 9)*0.2+0.2), wall, style > 0.5 and rand(r, 4) < 0.4)
-    maxdist = max(abs(uv.x - 7), abs(uv.y - 7))
+    maxdist = ti.max(abs(uv.x - 7), abs(uv.y - 7))
     for i in range(2, fl * 4):
         light = mix(vec3(0.25,0.35,0.38), vec3(0.7,0.7,0.6), rand(rand(X.x, X.y), i//2)>0.6)
         if maxdist < 6:
@@ -71,7 +71,7 @@ def build_building(X, uv, d, r):
         for i in range(2, 5): scene.set_voxel(vec3(X.x,i,X.y), 0, vec3(0))
     if d.sum() > 0 and uv.y == 3 and 4 < uv.x < 10:
         for i in range(2, 5): scene.set_voxel(vec3(X.x,i,X.y), 1, vec3(0.7,0.7,0.6))
-    if max(abs(uv.x - rand(r, 8)*7-4), abs(uv.y - rand(r, 10)*7-4)) < 1.5: # HVAC
+    if ti.max(abs(uv.x - rand(r, 8)*7-4), abs(uv.y - rand(r, 10)*7-4)) < 1.5: # HVAC
         for i in range(fl*4+1, fl*4+3): scene.set_voxel(vec3(X.x, i, X.y), 51, vec3(0.6))
 @ti.func
 def build_park(X, uv, d, r):
@@ -79,12 +79,12 @@ def build_park(X, uv, d, r):
     for i in range(height + 3): # tree
         if (uv - center).norm() < 1:
             scene.set_voxel(vec3(X.x, i, X.y), 30, vec3(0.36, 0.18, 0.06))
-        if i > min(height-4, (height+5)//2) and (uv - center).norm() < (height+3-i) * (rand(r, 4)*0.6 + 0.4):
+        if i > ti.min(height-4, (height+5)//2) and (uv - center).norm() < (height+3-i) * (rand(r, 4)*0.6 + 0.4):
             scene.set_voxel(vec3(X.x, i, X.y), 80 if ti.random()<0.8 else 0, vec3(0.1, 0.3 + ti.random()*0.2, 0.1))
     h = 2 * ti.sin((uv.x**2+uv.y**2+rand(r, 0)**2*256)/1024 * 2*pi) + 2 + (ti.random() > 0.95)
     for i in range(int(h)): # grass
         scene.set_voxel(vec3(X.x, i, X.y), 80, vec3(0.2, 0.5 + ti.random() * 0.2, 0.05))
-    if max(abs(uv.x - rand(r, 4)*7-4), abs(uv.y - rand(r, 5)*7-4)) < 0.5: # light
+    if ti.max(abs(uv.x - rand(r, 4)*7-4), abs(uv.y - rand(r, 5)*7-4)) < 0.5: # light
         for i in range(3):
             scene.set_voxel(vec3(X.x, h+i, X.y), 1+(i==1), mix(vec3(0.2),vec3(0.9,0.8,0.6),vec3(i==1)))
 

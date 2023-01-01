@@ -44,7 +44,7 @@ def initialize():
     brighten(ivec3(-22, 28, -58), ivec3(21, 7, 5), 1.8)
     brighten(ivec3(-31, -1, -58), ivec3(6, 36, 5), 1.8)
     # Carpet
-    for x,z in ti.ndrange((-30,0),(-22,38)):set(ivec3(x,-19,z),1,vec3(1)if(24<max(abs(z-8),-x)<27)else vec3(.9,.6,.7))
+    for x,z in ti.ndrange((-30,0),(-22,38)):set(ivec3(x,-19,z),1,vec3(1)if(24<ti.max(abs(z-8),-x)<27)else vec3(.9,.6,.7))
     for a in range(1024): v = a / 1024 * pi; x, z = (ti.round((10 * abs(ti.sin(12 * v)) + 10) * ti.cos(10 * v)),
         8 + (10 * abs(ti.sin(12 * v)) + 10) * ti.sin(10 * v)); set(ivec3(x, -19, z), 1 if x < 0 else 0, vec3(1))
     fill(ivec3(-8, -19, -50), ivec3(8, 15, 8), 1, vec3(1)) # Box 1

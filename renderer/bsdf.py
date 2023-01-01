@@ -94,15 +94,15 @@ class DisneyBSDF:
         
         aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
 
-        ax = max(sqr(mat.roughness) / aspect, 1e-3)
-        ay = max(sqr(mat.roughness) * aspect, 1e-3)
+        ax = ti.max(sqr(mat.roughness) / aspect, 1e-3)
+        ay = ti.max(sqr(mat.roughness) * aspect, 1e-3)
 
         D = self.GTR2_anisotropic(n_dot_h, h_dot_x, h_dot_y, ax, ay)
         G = self.smithG_GGX_aniso(n_dot_l, l_dot_x, l_dot_y, ax, ay) \
         * self.smithG_GGX_aniso(n_dot_v, v_dot_x, v_dot_y, ax, ay)
         F = self.disney_fresnel(mat, l_dot_h)
 
-        return D * G* F# / max(4.0 * n_dot_l * n_dot_v, 1e-5)
+        return D * G* F# / ti.max(4.0 * n_dot_l * n_dot_v, 1e-5)
 
     @ti.func
     def sclick_fresnel(v_dot_h, n1, n2):
@@ -203,8 +203,8 @@ class DisneyBSDF:
         u = ti.Vector([ti.random(), ti.random()])
         alpha = mix(0.1, 0.001, mat.clearcoat_gloss)
         a2 = sqr(alpha)
-        cosTheta = ti.sqrt(max(1e-4, (1.0 - pow(a2, 1.0 - u.x))/(1.0 - a2)))
-        sinTheta = ti.sqrt(max(1e-4, 1.0 - cosTheta * cosTheta))
+        cosTheta = ti.sqrt(ti.max(1e-4, (1.0 - pow(a2, 1.0 - u.x))/(1.0 - a2)))
+        sinTheta = ti.sqrt(ti.max(1e-4, 1.0 - cosTheta * cosTheta))
 
         phi = 2.0 * np.pi * u.y
 
@@ -241,7 +241,7 @@ class DisneyBSDF:
         p1 = r * ti.cos(phi)
         p2 = r * ti.sin(phi) * (1.0 if u.y < a else V.y)
 
-        m = p1 * t1 + p2 * t2 + ti.sqrt(max(0.0, 1.0 - p1 * p1 - p2 * p2)) * V
+        m = p1 * t1 + p2 * t2 + ti.sqrt(ti.max(0.0, 1.0 - p1 * p1 - p2 * p2)) * V
         m = vec3([ax * m.x, m.y, ay * m.z]).normalized()
 
         # convert to world space
@@ -256,8 +256,8 @@ class DisneyBSDF:
 
         aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
 
-        ax = max(sqr(mat.roughness) / aspect, 1e-3)
-        ay = max(sqr(mat.roughness) * aspect, 1e-3)
+        ax = ti.max(sqr(mat.roughness) / aspect, 1e-3)
+        ay = ti.max(sqr(mat.roughness) * aspect, 1e-3)
 
         h = (v + l).normalized()
 
@@ -281,8 +281,8 @@ class DisneyBSDF:
 
         aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
 
-        ax = max(sqr(mat.roughness) / aspect, 1e-3)
-        ay = max(sqr(mat.roughness) * aspect, 1e-3)
+        ax = ti.max(sqr(mat.roughness) / aspect, 1e-3)
+        ay = ti.max(sqr(mat.roughness) * aspect, 1e-3)
 
         m = self.GGX_VNDF_aniso(mat, v, n, tang, bitang, ax, ay)
 
@@ -468,15 +468,15 @@ class DisneyBSDF:
         
         aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
 
-        ax = max(sqr(mat.roughness) / aspect, 1e-3)
-        ay = max(sqr(mat.roughness) * aspect, 1e-3)
+        ax = ti.max(sqr(mat.roughness) / aspect, 1e-3)
+        ay = ti.max(sqr(mat.roughness) * aspect, 1e-3)
 
         D = self.GTR2_anisotropic(n_dot_h, h_dot_x, h_dot_y, ax, ay)
         G = self.smithG_GGX_aniso(n_dot_l, l_dot_x, l_dot_y, ax, ay) \
         * self.smithG_GGX_aniso(n_dot_v, v_dot_x, v_dot_y, ax, ay)
         F = self.sclick_fresnel(v_dot_h, n1, n2)
 
-        return D * G* F# / max(4.0 * n_dot_l * n_dot_v, 1e-5)
+        return D * G* F# / ti.max(4.0 * n_dot_l * n_dot_v, 1e-5)
 
     @ti.func
     def translucent_transmission(self, mat, \
@@ -488,8 +488,8 @@ class DisneyBSDF:
                          tang, bitang, n1, n2):
         aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
 
-        ax = max(sqr(mat.roughness) / aspect, 1e-3)
-        ay = max(sqr(mat.roughness) * aspect, 1e-3)
+        ax = ti.max(sqr(mat.roughness) / aspect, 1e-3)
+        ay = ti.max(sqr(mat.roughness) * aspect, 1e-3)
 
         D = self.GTR2_anisotropic(n_dot_h, h_dot_x, h_dot_y, ax, ay)
         G = self.smithG_GGX_aniso(n_dot_l, l_dot_x, l_dot_y, ax, ay) \
@@ -578,8 +578,8 @@ class DisneyBSDF:
         else:
             aspect = ti.sqrt(1.0 - 0.9*mat.anisotropic)
 
-            ax = max(sqr(mat.roughness) / aspect, 1e-3)
-            ay = max(sqr(mat.roughness) * aspect, 1e-3)
+            ax = ti.max(sqr(mat.roughness) / aspect, 1e-3)
+            ay = ti.max(sqr(mat.roughness) * aspect, 1e-3)
 
             m = self.GGX_VNDF_aniso(mat, v, n, tang, bitang, ax, ay)
 

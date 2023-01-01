@@ -9,7 +9,7 @@ import __main__
 
 
 VOXEL_DX = 1 / 64
-SCREEN_RES = (1920, 1080)
+SCREEN_RES = (3440, 1440)
 UP_DIR = (0, 1, 0)
 HELP_MSG = """
 ====================================================
@@ -173,6 +173,17 @@ class Scene:
 
     def finish(self):
         self.renderer.prepare_data()
+
+        print("Computing clouds")
+        max_samples = 32
+        for i in range(1, max_samples+1):
+            self.renderer.accumulate_clouds(max_samples)
+            print(i,"/",max_samples," samples")
+            self.window.show()
+        print("Computing atmosphere")
+        self.renderer.compute_atmosphere()
+        print("Done atmosphere & clouds")
+
         canvas = self.window.get_canvas()
         gui = self.window.get_gui()
         samples = 0

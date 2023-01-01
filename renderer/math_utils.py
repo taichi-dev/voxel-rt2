@@ -8,7 +8,7 @@ uvec2 = ti.types.vector(2, ti.u32)
 
 @ti.func
 def saturate(x):
-    return min(max(x, 0.0), 1.0)
+    return ti.min(ti.max(x, 0.0), 1.0)
 
 @ti.func
 def sqr(x):
@@ -31,7 +31,7 @@ def sample_cosine_weighted_hemisphere(n):
 
 @ti.func
 def make_orthonormal_basis(n):
-    h = ti.math.vec3(1.0, 0.0, 0.0) if ti.abs(n.y) > 0.9 else ti.math.vec3(0.0, 1.0, 0.0)
+    h = ti.select(ti.abs(n.y) > 0.9, ti.math.vec3(1.0, 0.0, 0.0), ti.math.vec3(0.0, 1.0, 0.0))
     y = n.cross(h).normalized()
     x = n.cross(y)
     return x, y
@@ -210,7 +210,7 @@ def encode_unit_vector_3x16(vec):
 def decode_unit_vector_3x16(a):
     encoded = ti.cast(a, ti.f32) * 2.0 - 1.0
     vec = ti.Vector([encoded.x, encoded.y, 1.0 - abs(encoded.x) - abs(encoded.y)])
-    t = max(-vec.z, 0.0)
+    t = ti.max(-vec.z, 0.0)
     vec.xy += ti.Vector([-t if vec.x >= 0.0 else t, -t if vec.y >= 0.0 else t])
     return vec.normalized()
 

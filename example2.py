@@ -12,7 +12,7 @@ def initialize_voxels():
         for j in range(31):
             is_light = int(j % 10 != 0)
             scene.set_voxel(vec3(j, i, -30), is_light + 1, vec3(1, 1, 1))
-            color = max(i, j)
+            color = ti.max(i, j)
             if color % 2 == 0:
                 scene.set_voxel(
                     vec3(0, i, j - 30), 1,
