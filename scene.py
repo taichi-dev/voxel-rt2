@@ -9,7 +9,7 @@ import __main__
 
 
 VOXEL_DX = 1 / 64
-SCREEN_RES = (3440, 1440)
+SCREEN_RES = (2560, 1440)
 UP_DIR = (0, 1, 0)
 HELP_MSG = """
 ====================================================
@@ -19,9 +19,6 @@ Camera:
 * P to screenshot
 ====================================================
 """
-
-MAT_LAMBERTIAN = 1
-MAT_LIGHT = 2
 
 from taichi.lang.impl import _ti_core
 
@@ -174,16 +171,6 @@ class Scene:
     def finish(self):
         self.renderer.prepare_data()
 
-        print("Computing clouds")
-        max_samples = 32
-        for i in range(1, max_samples+1):
-            self.renderer.accumulate_clouds(max_samples)
-            print(i,"/",max_samples," samples")
-            self.window.show()
-        print("Computing atmosphere")
-        self.renderer.compute_atmosphere()
-        print("Done atmosphere & clouds")
-
         canvas = self.window.get_canvas()
         gui = self.window.get_gui()
         samples = 0
@@ -208,7 +195,17 @@ class Scene:
 
         # _ti_core.wait_for_debugger()
 
+        sample_idx = 1
+        if self.renderer.use_physical_atmosphere[None] == 1:
+            print("Computing clouds")
+        max_samples = 32
+
+        # split rendering of skybox into slices as to not timeout
+        slice_idx = 0
+        max_slices = 32
         while self.window.running:
+            
+
             should_reset_framebuffer = False
             self.renderer.set_max_samples(999999999.0)
             self.renderer.set_render_scale(1.0)
@@ -243,8 +240,22 @@ class Scene:
             if should_reset_framebuffer:
                 self.renderer.reset_framebuffer()
 
-            for i in range(samples_per_frame):
-                self.renderer.accumulate()
+            if sample_idx < max_samples+1 and self.renderer.use_physical_atmosphere[None] == 1:
+                self.renderer.accumulate_clouds(max_samples)
+                print(sample_idx,"/",max_samples," cloud samples")
+                self.window.show()
+                sample_idx += 1
+            elif sample_idx == max_samples+1 and slice_idx < max_slices and self.renderer.use_physical_atmosphere[None] == 1:
+                print(slice_idx+1,"/",max_slices," skybox progress")
+                self.renderer.compute_atmosphere(slice_idx, max_slices)
+                if slice_idx == max_slices - 1:
+                    print("Done atmosphere & clouds")
+                slice_idx += 1
+            else:
+                for i in range(samples_per_frame):
+                    self.renderer.accumulate()
+
+
             img = self.renderer.fetch_image()
 
             self.renderer.copy_prev_matrices()

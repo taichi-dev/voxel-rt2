@@ -37,14 +37,12 @@ import csv
 # 51 = Smooth metal
 # 52 = Mirror
 # 53 = Brushed metal (anisotropic)
-# 54 = Gloss coated, rough metal
-# 55 = Car paint (partially metallic)
+# 54 = Car paint (partially metallic)
 #
 ######   Misc   ######
 # 80 = Plant
 # 81 = Light skin
-# 82 = Dark skin
-# 83 = Cloth
+# 82 = Cloth
 
 @ti.data_oriented
 class MaterialList:

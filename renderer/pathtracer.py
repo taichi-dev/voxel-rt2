@@ -12,7 +12,7 @@ from renderer.space_transformations import *
 from renderer.reservoir import *
 from renderer.atmos import *
 
-USE_RESTIR_PT = False
+USE_RESTIR_PT = True
 
 MAX_RAY_DEPTH = 4
 use_directional_light = True
@@ -310,11 +310,10 @@ class Renderer:
         d = screen_to_view(texcoord, 1.0, self.proj_mat_inv[None]).normalized()
         d = view_to_world(d, self.view_mat_inv[None], 0.0)
         return d
-
+        
     def prepare_data(self):
         self.world.update_data()
         self.voxel_raytracer._update_lods(self.world.voxel_material, ti.Vector(self.world.voxel_grid_offset))
-
         if self.use_physical_atmosphere[None] == 1:
             self.atmos.load_textures()
             print("Generating atmosphere LUT")
@@ -326,8 +325,8 @@ class Renderer:
     def accumulate_clouds(self, max_samples):
             self.atmos.accumulate_clouds(self.light_direction[None], self.light_color[None] * self.light_weight, self.light_cone_cos_theta_max[None], max_samples)
 
-    def compute_atmosphere(self):
-            self.atmos.compute_skybox(self.light_direction[None], self.light_color[None] * self.light_weight, self.light_cone_cos_theta_max[None])
+    def compute_atmosphere(self, slice_idx, max_slices):
+            self.atmos.compute_skybox(self.light_direction[None], self.light_color[None] * self.light_weight, self.light_cone_cos_theta_max[None], slice_idx, max_slices)
         
     @ti.func
     def generate_new_sample(self, u: ti.f32, v: ti.f32):
@@ -656,10 +655,10 @@ class Renderer:
             dev = ti.sqrt(ti.max(var, 1e-5))
             high_threshold = 0.1 + avg + dev * 4.0
             overflow = ti.max(0.0, hdr_color - high_threshold)
-            hdr_color -= overflow
+            # hdr_color -= overflow
 
-            ldr_color = ti.pow(
-                uchimura(hdr_color * darken * self.exposure), 1.0 / 2.2)
+            ldr_color = saturate(ti.pow(
+                uchimura(hdr_color * darken * self.exposure), 1.0 / 2.2))
             img.store(ti.Vector([i, j]), ti.Vector([ldr_color.r, ldr_color.g, ldr_color.b, 1.0]))
 
     def reset_framebuffer(self):
@@ -1065,6 +1064,15 @@ class Renderer:
             self.specular_stdev[u, v] = ti.sqrt(ti.max(mean_sqr - mean * mean, 0.0))
 
             self.gbuff_depth_reflection[u, v] = refl_depth_sum / valid_reflection_depths if valid_reflection_depths > 0.01 else 0.0
+
+            # remove any NaN's
+            col_diffuse = self.color_buffer[u, v]
+            col_specular = self.color_buffer_specular[u, v]
+
+            if any(isnan(col_diffuse)) or any(isinf(col_diffuse)) or any(col_diffuse < 0.0):
+                self.color_buffer[u, v] = vec3(0., 0., 0.)
+            if any(isnan(col_specular)) or any(isinf(col_specular)) or any(col_specular < 0.0):
+                self.color_buffer_specular[u, v] = vec3(0., 0., 0.)
 
     @ti.func
     def bilinear_sample(self, buffer, uv):

@@ -63,8 +63,8 @@ class Atmos:
 
         self.trans_LUT = ti.Vector.field(3, dtype=ti.f16, shape=(256, 128))
 
-        self.skybox_fres = ti.Vector([1.0/5120.0, 1.0/5120.0])
-        self.skybox_res = ti.Vector([5120, 5120])
+        self.skybox_fres = ti.Vector([1.0/3840.0, 1.0/3840.0])
+        self.skybox_res = ti.Vector([3840, 3840])
         self.skybox_scattering = ti.Vector.field(3, dtype=ti.f32, shape=(self.skybox_res.x, self.skybox_res.y))
         self.skybox_transmittance = ti.Vector.field(3, dtype=ti.f32, shape=(self.skybox_res.x, self.skybox_res.y))
         # Cloud constants
@@ -157,19 +157,17 @@ class Atmos:
             self.skybox_transmittance[u, v].y += cloud_dist * fmax_samples # vec3(cloud_transmittance, cloud_dist, 0.0) * fmax_samples
 
     @ti.kernel
-    def compute_skybox(self, sun_dir : vec3, sun_col : vec3, sun_cone_cos_theta_max : ti.f32):
+    def compute_skybox(self, sun_dir : vec3, sun_col : vec3, sun_cone_cos_theta_max : ti.f32, slice_idx : ti.i32, max_slices : ti.i32):
 
-        for u, v in self.skybox_scattering:
-            texcoord = (ti.Vector([u, v]) + 0.5) * self.skybox_fres
+        slice_width = self.skybox_res.x // max_slices
+
+        for offset in ti.grouped(ti.ndrange((slice_width * slice_idx, slice_width * (slice_idx + 1)), (0, self.skybox_res.y))):
+            texcoord = (offset + 0.5) * self.skybox_fres
             ray_dir = self.unproject_sky(texcoord)
 
-            cloud_in_scatter = self.skybox_scattering[u, v]
-            cloud_transmittance = self.skybox_transmittance[u, v].x
-            cloud_dist = self.skybox_transmittance[u, v].y
-
-            # ccccc, cloud_transmittance, ccc = self.clouds_scattering(self.cam_pos, ray_dir, \
-            #                                                                             sun_dir, sun_col, sun_cone_cos_theta_max, \
-            #                                                                             ti.random())
+            cloud_in_scatter = self.skybox_scattering[offset]
+            cloud_transmittance = self.skybox_transmittance[offset].x
+            cloud_dist = self.skybox_transmittance[offset].y
 
             sky_in_scatter_total, sky_transmittance_total = self.atmospheric_scattering(self.cam_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, 0)
             cloud_pos = self.cam_pos + ray_dir * max(cloud_dist, 0.0)
@@ -187,8 +185,8 @@ class Atmos:
                 in_scattering -= sky_in_scatter_from_cloud * saturate(transmittance_to_cloud * max(1.0 - cloud_transmittance, 0.0))
                 in_scattering += cloud_in_scatter * saturate(transmittance_to_cloud)
 
-            self.skybox_scattering[u, v] = in_scattering
-            self.skybox_transmittance[u, v] = sky_transmittance_total * cloud_transmittance
+            self.skybox_scattering[offset] = in_scattering
+            self.skybox_transmittance[offset] = sky_transmittance_total * cloud_transmittance
    
     ######
 
@@ -269,13 +267,13 @@ class Atmos:
         return mix(mix(front, back, 0.5), peak, 0.15)
 
     @ti.func
-    def clouds_scattering(self, ray_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, dither):
+    def clouds_scattering(self, ray_origin, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, dither):
         steps = 32
         fsteps = 1.0 / ti.cast(steps, ti.f32)
 
-        bottom_cloud_lambda = rsi(ray_pos, ray_dir, self.planet_r + self.planet_r_offset + self.cloud_height).y
-        top_cloud_lambda = rsi(ray_pos, ray_dir, self.planet_r + self.planet_r_offset + self.cloud_height + self.cloud_thickness).y
-        planet_lambda = rsi(ray_pos, ray_dir, self.planet_r).x
+        bottom_cloud_lambda = rsi(ray_origin, ray_dir, self.planet_r + self.planet_r_offset + self.cloud_height).y
+        top_cloud_lambda = rsi(ray_origin, ray_dir, self.planet_r + self.planet_r_offset + self.cloud_height + self.cloud_thickness).y
+        planet_lambda = rsi(ray_origin, ray_dir, self.planet_r).x
 
         transmittance = 1.0
         in_scatter = vec3(0., 0., 0,)
@@ -285,11 +283,10 @@ class Atmos:
         weight_sum = 0.0
         weighted_dist = 0.0
 
-        ray_origin = ray_pos
 
         if planet_lambda <= 0.0 or True: # did not hit planet
-            start = ray_pos + ray_dir * bottom_cloud_lambda
-            end = ray_pos + ray_dir * top_cloud_lambda
+            start = ray_origin + ray_dir * bottom_cloud_lambda
+            end = ray_origin + ray_dir * top_cloud_lambda
 
             step_delta = (top_cloud_lambda - bottom_cloud_lambda) * fsteps
             ray_step = ray_dir * step_delta
@@ -356,19 +353,19 @@ class Atmos:
     ### ATMOSPHERE FUNCTIONS ###
 
     @ti.func
-    def atmospheric_scattering(self, ray_pos, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, depth : ti.template(), steps = 64):
+    def atmospheric_scattering(self, ray_origin, ray_dir, sun_dir, sun_col, sun_cone_cos_theta_max, depth : ti.template(), steps = 64):
         #
-        # r(p) = ray_pos + ray_dir * lambda
+        # r(p) = ray_origin + ray_dir * lambda
         #
         fsteps = 1.0 / ti.cast(steps, ti.f32)
 
-        air_lambdas = rsi(ray_pos, ray_dir, self.planet_r + self.atmos_height)
-        planet_lambdas = rsi(ray_pos, ray_dir, self.planet_r)
+        air_lambdas = rsi(ray_origin, ray_dir, self.planet_r + self.atmos_height)
+        planet_lambdas = rsi(ray_origin, ray_dir, self.planet_r)
         air_lambdas.y = ti.min(air_lambdas.y, planet_lambdas.x) if planet_lambdas.x > 0.0 else air_lambdas.y
 
         step_delta = (air_lambdas.y - ti.max(air_lambdas.x, 0.0)) * fsteps
         ray_step = ray_dir*step_delta
-        ray_pos = ray_pos + ray_step*(0.5)
+        ray_pos = ray_origin + ray_step*(0.5)
 
         transmittance = vec3(1., 1., 1.)
         in_scatter_col = vec3(0., 0., 0.)
@@ -409,7 +406,7 @@ class Atmos:
                     cos_theta = ray_dir.dot(sample_dir)
                     phases = ti.Vector([1.0, mie_phase(cos_theta, self.mie_g)])
 
-                    ambient_scatter, ambient_trans = self.atmospheric_scattering(ray_pos, sample_dir, sun_dir, sun_col, sun_cone_cos_theta_max, depth+1, 8)
+                    ambient_scatter, ambient_trans = self.atmospheric_scattering(ray_pos, sample_dir, sun_dir, sun_col, sun_cone_cos_theta_max, depth+1, 5)
                     
                     # Not using rayleigh phase here because it looks better for this bad multiple scattering
                     in_scatter_col += ms_energy * self.rayleigh_coeff * ambient_scatter * visible_scattering * density.x * step_delta / ti.cast(MS_SAMPLE_COUNT, ti.f32)
