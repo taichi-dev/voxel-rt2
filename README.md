@@ -1,7 +1,9 @@
 # <a name="title">Taichi Voxel Challenge</a>
 
 <p align="center">
-<img src="demo.jpg" width="75%"></img>
+<img src="demo.jpg" width="50%"></img>
+<img src="demo2.jpg" width="50%"></img>
+<img src="demo3.jpg" width="50%"></img>
 </p>
 
 > Figure: result of `python3 example6.py`. Please replace the image above (`demo.jpg`) with yours, so that other people can immediately see your results :-)
@@ -21,6 +23,8 @@ The available APIs are:
 + `scene.set_floor(height, color)`
 + `scene.set_directional_light(dir, noise, color)`
 + `scene.set_background_color(color)`
++ `scene.set_use_physical_sky(True/False)`
++ `scene.set_use_clouds(True/False)`
 
 Remember to call `scene.finish()` at last.
 
