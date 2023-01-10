@@ -12,7 +12,7 @@ from renderer.space_transformations import *
 from renderer.reservoir import *
 from renderer.atmos import *
 
-USE_RESTIR_PT = True
+USE_RESTIR_PT = False
 
 MAX_RAY_DEPTH = 4
 use_directional_light = True
@@ -1310,7 +1310,7 @@ class Renderer:
     def accumulate(self):
         self.render(self.world.voxel_color_texture)
         if ti.static(USE_RESTIR_PT):
-            self.spatial_GRIS(0, 16.0, 12, 1, self.world.voxel_color_texture)
+            self.spatial_GRIS(0, 24.0, 32, 1, self.world.voxel_color_texture)
             # self.spatial_GRIS(1, 16.0, 6, 2, self.world.voxel_color_texture)
         self.temporal_filter_prepass()
         self.temporal_filter()

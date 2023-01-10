@@ -9,7 +9,7 @@ import __main__
 
 
 VOXEL_DX = 1 / 64
-SCREEN_RES = (2560, 1440)
+SCREEN_RES = (1920, 1080)
 UP_DIR = (0, 1, 0)
 HELP_MSG = """
 ====================================================
@@ -254,6 +254,7 @@ class Scene:
             else:
                 for i in range(samples_per_frame):
                     self.renderer.accumulate()
+                print("pos ", self.camera.position, "look_at ", self.camera.look_at)
 
 
             img = self.renderer.fetch_image()
